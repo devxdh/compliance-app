@@ -53,7 +53,7 @@ function decodeKey(rawValue: string, envName: string): Uint8Array {
 /**
  * Reads and validates the worker's environment in one place.
  *
- * Layman terms:
+ * 
  * The worker should crash early if a secret or schema name is wrong. That is
  * safer than starting with a bad config and damaging customer data later.
  */

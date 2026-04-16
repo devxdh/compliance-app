@@ -1,9 +1,9 @@
 import request from "supertest";
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { app } from "../../src/app";
-import { sql } from "../../src/db/index";
-import { eventBus } from "../../src/utils/event-bus";
-import { setupDatabase, teardownDatabase } from "../../src/db/schema";
+import { app } from "../../../src/app";
+import { sql } from "../../../src/db/index";
+import { eventBus } from "../../../src/utils/event-bus";
+import { setupDatabase, teardownDatabase } from "../../../src/db/schema";
 
 describe("GET /api/v1/worker/sync", () => {
   const CLIENT_ID = "test-client-123";
@@ -14,20 +14,19 @@ describe("GET /api/v1/worker/sync", () => {
 
   afterAll(async () => {
     await teardownDatabase();
-    await sql.end();
   });
 
   beforeEach(async () => {
     await sql`DELETE FROM pending_tasks WHERE client_id = ${CLIENT_ID}`;
   });
 
-  it("should return 400 if x-client-id is missing", async () => {
+  it("returns 400 if x-client-id is missing", async () => {
     const res = await request(app).get("/api/v1/worker/sync");
     expect(res.status).toBe(400);
     expect(res.body.error).toBe("x-client-id header is required");
   });
 
-  it("should return a task immediately if one is pending (fast path)", async () => {
+  it("returns a task immediately if one is pending", async () => {
     await sql`
       INSERT INTO pending_tasks (client_id, task_type, payload)
       VALUES (${CLIENT_ID}, 'VAULT_DATA', '{"user_id": 1}')
@@ -44,7 +43,7 @@ describe("GET /api/v1/worker/sync", () => {
     expect(tasks[0]?.status).toBe("claimed");
   });
 
-  it("should resolve immediately when a new event is emitted via Event Bus", async () => {
+  it("resolves when an event is emitted on event bus", async () => {
     const syncPromise = request(app).get("/api/v1/worker/sync").set("x-client-id", CLIENT_ID);
 
     setTimeout(() => {
@@ -57,5 +56,30 @@ describe("GET /api/v1/worker/sync", () => {
     expect(res.body.pending).toBe(true);
     expect(res.body.task).toBeDefined();
     expect(res.body.task.task_type).toBe("NOTIFY_USER");
+  });
+
+  it("supports task enqueue -> sync -> ack lifecycle", async () => {
+    const createRes = await request(app)
+      .post("/api/v1/worker/tasks")
+      .set("x-client-id", CLIENT_ID)
+      .send({ task_type: "SHRED_USER", payload: { user_id: 42 } });
+
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.task.status).toBe("pending");
+
+    const syncRes = await request(app).get("/api/v1/worker/sync").set("x-client-id", CLIENT_ID);
+    expect(syncRes.status).toBe(200);
+    expect(syncRes.body.pending).toBe(true);
+    expect(syncRes.body.task.status).toBe("claimed");
+
+    const taskId = syncRes.body.task.id as string;
+    const ackRes = await request(app).post(`/api/v1/worker/tasks/${taskId}/ack`).send({
+      status: "completed",
+      result: { accepted: true },
+    });
+
+    expect(ackRes.status).toBe(200);
+    expect(ackRes.body.task.status).toBe("completed");
+    expect(ackRes.body.task.result).toEqual({ accepted: true });
   });
 });

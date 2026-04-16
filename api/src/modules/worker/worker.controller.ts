@@ -1,19 +1,40 @@
 import type { Request, Response } from "express";
-import { z } from "zod";
-import { sql } from "../../db/index";
-import { eventBus } from "../../utils/event-bus";
+import type { JsonObject } from "../../types/common";
+import { WorkerService } from "./worker.service";
+import { workerRepository } from "./worker.repository";
+import {
+  ackTaskSchema,
+  clientIdHeaderSchema,
+  enqueueTaskSchema,
+  outboxIngestSchema,
+  paginationQuerySchema,
+} from "./worker.schemas";
 
-const longPollTimeoutMs = 25_000;
-
-const outboxPayloadSchema = z.object({
-  event_type: z.string().min(1),
-  payload: z.record(z.string(), z.any()),
-});
-
+/**
+ * 
+ * Controller functions translate HTTP requests into worker operations.
+ *
+ * 
+ * Thin transport layer handling validation, status codes, and response mapping.
+ */
 function getClientId(req: Request): string | null {
-  const raw = req.headers["x-client-id"];
-  return typeof raw === "string" && raw.length > 0 ? raw : null;
+  const raw = req.headers["x-client-id"] ?? req.query.client_id;
+  const parsed = clientIdHeaderSchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
 }
+
+/**
+ * 
+ * Reads path parameters safely and avoids accidental array values.
+ *
+ * 
+ * Normalizes Express route param union into nullable string.
+ */
+function getRouteParam(value: string | string[] | undefined): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+const workerService = new WorkerService(workerRepository);
 
 export async function syncWorker(req: Request, res: Response): Promise<void> {
   const clientId = getClientId(req);
@@ -23,52 +44,14 @@ export async function syncWorker(req: Request, res: Response): Promise<void> {
   }
 
   try {
-    const tasks = await sql`
-      SELECT * FROM pending_tasks
-      WHERE client_id = ${clientId} AND status = 'pending'
-      ORDER BY created_at ASC
-      LIMIT 1
-    `;
-
-    if (tasks.length > 0) {
-      const task = tasks[0];
-      await sql`UPDATE pending_tasks SET status = 'claimed' WHERE id = ${task?.id}`;
-      res.json({ pending: true, task });
+    const fastPath = await workerService.syncWorker(clientId);
+    if (fastPath.pending) {
+      res.json(fastPath);
       return;
     }
 
-    const channelName = `task_ready_${clientId}`;
-    let isResolved = false;
-
-    const onNewTask = (taskData: unknown) => {
-      if (isResolved) {
-        return;
-      }
-      isResolved = true;
-      clearTimeout(timeout);
-      eventBus.removeListener(channelName, onNewTask);
-      res.json({ pending: true, task: taskData });
-    };
-
-    eventBus.once(channelName, onNewTask);
-
-    const timeout = setTimeout(() => {
-      if (isResolved) {
-        return;
-      }
-      isResolved = true;
-      eventBus.removeListener(channelName, onNewTask);
-      res.json({ pending: false });
-    }, longPollTimeoutMs);
-
-    req.on("close", () => {
-      if (isResolved) {
-        return;
-      }
-      isResolved = true;
-      clearTimeout(timeout);
-      eventBus.removeListener(channelName, onNewTask);
-    });
+    const result = await workerService.waitForTask(clientId);
+    res.json(result);
   } catch (error) {
     console.error("Error in syncWorker:", error);
     res.status(500).json({ error: "Internal Server Error" });
@@ -82,23 +65,116 @@ export async function receiveOutbox(req: Request, res: Response): Promise<void> 
     return;
   }
 
-  const parsedBody = outboxPayloadSchema.safeParse(req.body);
+  const parsedBody = outboxIngestSchema.safeParse(req.body);
   if (!parsedBody.success) {
     res.status(400).json({ error: "event_type and payload are required" });
     return;
   }
 
   try {
-    const { event_type, payload } = parsedBody.data;
-    const events = await sql`
-      INSERT INTO worker_outbox_events (client_id, event_type, payload)
-      VALUES (${clientId}, ${event_type}, ${sql.json(JSON.parse(JSON.stringify(payload)))})
-      RETURNING id, event_type, processed_at
-    `;
-
-    res.status(201).json({ success: true, event: events[0] });
+    const { event_type, payload, idempotency_key } = parsedBody.data;
+    const { created, event } = await workerService.receiveOutbox(
+      clientId,
+      event_type,
+      payload as JsonObject,
+      idempotency_key ?? null
+    );
+    res.status(created ? 201 : 200).json({ success: true, deduplicated: !created, event });
   } catch (error) {
     console.error("Error in receiveOutbox:", error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+}
+
+export async function createTask(req: Request, res: Response): Promise<void> {
+  const clientId = getClientId(req);
+  if (!clientId) {
+    res.status(400).json({ error: "x-client-id header is required" });
+    return;
+  }
+
+  const parsedBody = enqueueTaskSchema.safeParse(req.body);
+  if (!parsedBody.success) {
+    res.status(400).json({ error: "task_type and payload are required" });
+    return;
+  }
+
+  try {
+    const { task_type, payload } = parsedBody.data;
+    const task = await workerService.enqueueTask(clientId, task_type, payload as JsonObject);
+    res.status(201).json({ success: true, task });
+  } catch (error) {
+    console.error("Error in createTask:", error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+}
+
+export async function getTask(req: Request, res: Response): Promise<void> {
+  const taskId = getRouteParam(req.params.taskId);
+  if (!taskId) {
+    res.status(400).json({ error: "taskId is required" });
+    return;
+  }
+
+  try {
+    const task = await workerService.getTask(taskId);
+    if (!task) {
+      res.status(404).json({ error: "Task not found" });
+      return;
+    }
+    res.status(200).json({ success: true, task });
+  } catch (error) {
+    console.error("Error in getTask:", error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+}
+
+export async function ackTask(req: Request, res: Response): Promise<void> {
+  const taskId = getRouteParam(req.params.taskId);
+  if (!taskId) {
+    res.status(400).json({ error: "taskId is required" });
+    return;
+  }
+
+  const parsedBody = ackTaskSchema.safeParse(req.body);
+  if (!parsedBody.success) {
+    res.status(400).json({ error: "status must be completed, failed, or cancelled" });
+    return;
+  }
+
+  try {
+    const { status, result, error } = parsedBody.data;
+    const task = await workerService.ackTask(taskId, status, (result as JsonObject | undefined) ?? null, error ?? null);
+    if (!task) {
+      res.status(404).json({ error: "Task not found or not claimable" });
+      return;
+    }
+    res.status(200).json({ success: true, task });
+  } catch (error) {
+    console.error("Error in ackTask:", error);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+}
+
+export async function listOutboxEvents(req: Request, res: Response): Promise<void> {
+  const clientId = getClientId(req);
+  if (!clientId) {
+    res.status(400).json({ error: "x-client-id header is required" });
+    return;
+  }
+
+  const parsedQuery = paginationQuerySchema.safeParse(req.query);
+  if (!parsedQuery.success) {
+    res.status(400).json({ error: "invalid pagination query" });
+    return;
+  }
+
+  try {
+    const { limit, offset } = parsedQuery.data;
+    const events = await workerService.listOutboxEvents(clientId, limit, offset);
+    res.status(200).json({ success: true, events, pagination: { limit, offset, count: events.length } });
+  } catch (error) {
+    console.error("Error in listOutboxEvents:", error);
     res.status(500).json({ error: "Internal Server Error" });
   }
 }
