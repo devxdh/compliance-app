@@ -18,6 +18,7 @@
     "api:dev": "bun run --cwd ./api dev",
     "api:start": "bun run --cwd ./api start",
     "api:typecheck": "bun run --cwd ./api typecheck",
+    "api:test": "bun run --cwd ./api test",
     "engine:test": "bun run --cwd ./compliance-engine test",
     "engine:test-ui": "bun run --cwd ./compliance-engine test:ui",
     "engine:typecheck": "bun run --cwd ./compliance-engine typecheck",

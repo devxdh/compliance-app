@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import { workerRouter } from "./features/worker/worker.router";
+import { workerRouter } from "./modules/worker/worker.router";
 
 const app = express();
 

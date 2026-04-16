@@ -10,3 +10,12 @@ Its current purpose is to give the monorepo a stable home for the future central
 - and certificate generation.
 
 For now it exposes a minimal Bun server so the package can be developed and typechecked inside the workspace without inventing the full API contract prematurely.
+
+## Current Structure
+
+- `src/modules/worker`
+  Worker-facing sync and outbox endpoints.
+- `src/db`
+  Postgres client and lightweight schema bootstrap.
+- `tests/worker`
+  Integration-style endpoint tests.
