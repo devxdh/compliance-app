@@ -1,0 +1,20 @@
+{
+  "name": "compliance-engine",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "vitest run --fileParallelism=false",
+    "test:ui": "vitest --ui",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "^4.1.4"
+  },
+  "dependencies": {
+    "javascript-obfuscator": "^5.4.1",
+    "postgres": "^3.4.9"
+  }
+}

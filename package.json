@@ -1,0 +1,28 @@
+{
+  "name": "compliance-app",
+  "private": true,
+  "packageManager": "bun@1.3.12",
+  "workspaces": {
+    "packages": [
+      "api",
+      "compliance-engine"
+    ],
+    "catalog": {
+      "@types/bun": "latest",
+      "@types/node": "^25.6.0",
+      "typescript": "^5.9.3"
+    }
+  },
+  "scripts": {
+    "dev": "bun run api:dev",
+    "api:dev": "bun run --cwd ./api dev",
+    "api:start": "bun run --cwd ./api start",
+    "api:typecheck": "bun run --cwd ./api typecheck",
+    "engine:test": "bun run --cwd ./compliance-engine test",
+    "engine:test-ui": "bun run --cwd ./compliance-engine test:ui",
+    "engine:typecheck": "bun run --cwd ./compliance-engine typecheck",
+    "test": "bun run engine:test",
+    "typecheck": "bun run api:typecheck && bun run engine:typecheck",
+    "check": "bun run typecheck && bun run test"
+  }
+}
