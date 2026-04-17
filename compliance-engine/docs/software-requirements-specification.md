@@ -24,6 +24,8 @@ Build a worker that runs inside a client's environment and handles the local, se
 10. The worker must refuse shredding before retention expiry.
 11. The worker must require a sent notice before shredding unless an operator overrides that behavior.
 12. The worker must retry outbox delivery failures with backoff and dead-letter handling.
+13. The worker must compute a Tamper-Evident Outbox hash sequence to guarantee append-only immutability.
+14. The worker must perform Schema Drift Detection at boot to guarantee the data integrity footprint matches its declarative configuration.
 
 ## Non-Functional Requirements
 

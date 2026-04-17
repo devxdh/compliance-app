@@ -11,6 +11,8 @@ The compliance engine resolves the retention paradox between privacy-driven dele
 - They can vault, notify, and shred with deterministic, testable behavior.
 - They can inspect dry-run plans before mutating production data.
 - They can rely on retryable outbox delivery instead of best-effort API calls.
+- They can ensure compliance via Tamper-Evident Outbox sequences guaranteeing append-only auditability.
+- They can protect data via automated Schema Drift Detection preventing unsafe mutations.
 
 ### For Auditors / Security Reviewers
 

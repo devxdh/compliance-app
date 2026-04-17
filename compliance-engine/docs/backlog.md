@@ -2,6 +2,11 @@
 
 ## Completed In This Iteration
 
+- **Implement Phase 1 Hardening: Liability Shield & Scale Engine**
+  - **Tamper-Evident Outbox (Hash Chaining):** Modified the `outbox` table to include `previous_hash` and `current_hash`. Re-wrote `enqueueOutboxEvent` to natively compute sequential SHA-256 hashes (`previous_hash + payload + idempotency_key`) using Web Crypto, providing a cryptographically verifiable chain of events. 
+  - **Schema Drift Detection:** Added a `detectSchemaDrift` utility that queries `information_schema.columns` to compute a deterministic hash of the target database schema structure.
+  - **Fail-Fast Startup Guard:** Updated the boot sequence (`src/index.ts`) to immediately throw a fatal error (`exit(1)`) if the computed live schema hash does not strictly match the `expected_schema_hash` declared in the declarative configuration (`compliance.worker.yml`).
+  - **Declarative YAML Configuration:** Swapped explicit `process.env` lookups for a `yaml` based `compliance.worker.yml` parsed strictly at boot. Kept secrets in `process.env` referenced dynamically via keys defined in YAML to ensure proper cryptographic segregation.
 - Replace placeholder pseudonymization with HMAC-backed worker hashing and pseudonyms.
 - Add validated worker configuration parsing.
 - Parameterize engine schema usage for cleaner test isolation.

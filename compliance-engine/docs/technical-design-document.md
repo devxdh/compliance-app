@@ -22,6 +22,11 @@
 - Stores notice/shred metadata in `pii_vault`.
 - Stores delivery state in `outbox`.
 
+### `src/engine/support.ts`
+
+- Contains `detectSchemaDrift` to compute $O(n)$ SHA-256 digests of `information_schema.columns` to protect worker boots against mutated target environments.
+- Implements `enqueueOutboxEvent` with Tamper-Evident Hash Chaining using native Web Crypto APIs to deterministically link Outbox operations from `GENESIS`.
+
 ### `src/engine/vault.ts`
 
 - Validates inputs and worker secrets.

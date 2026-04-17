@@ -55,3 +55,12 @@ When the worker finishes locking the safe, it doesn't immediately try to call he
 
 #### Technical Terms
 Outbox events (`USER_VAULTED`, `SHRED_SUCCESS`) are inserted in the exact same database transaction as the primary mutation, guaranteeing synchronization. Network delivery runs out-of-band using short row-level leases (`FOR UPDATE SKIP LOCKED`) to ensure concurrent workers do not dispatch duplicate webhooks. Permanent failures are routed to a Dead Letter Queue (`dead_letter`) after exponential backoff.
+
+### 6. The Liability Shield (Enterprise Hardening)
+
+#### Layman Terms
+Before the guard starts locking up safes, they first take a picture of the building's floor plan. If someone knocks down a wall or adds a new room overnight without telling the guard, the guard refuses to work because the floor plan changed (Schema Drift). Second, every time the guard drops a postcard in the outbox, they write down a mathematical code that perfectly links it to the postcard before it. If an auditor or a hacker tries to sneak a fake postcard into the middle of the stack, the entire chain of codes breaks, proving tampering.
+
+#### Technical Terms
+- **Schema Drift Detection**: At boot, the worker computes a deterministic `SHA-256` digest of `information_schema.columns` for the target `appSchema`. If the computed live schema digest does not strictly match the `expected_schema_hash` declared in the `compliance.worker.yml` manifest, the worker throws a fatal error and exits (`exit(1)`). This fail-fast mechanism guarantees the worker never performs destructive cryptographic operations on a mutated relational graph.
+- **Tamper-Evident Outbox**: The `dpdp_engine.outbox` functions as a cryptographically verifiable append-only ledger. Every event inserted computes a `current_hash` using `SHA-256(previous_hash + JSON(payload) + idempotency_key)`. The `previous_hash` is queried in $O(1)$ time via a descending index on `created_at`. This provides an unbroken chain of custody from the `GENESIS` event to the most recent operation, enabling robust auditability and mathematical proof of execution order.
