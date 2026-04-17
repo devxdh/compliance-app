@@ -2,6 +2,7 @@ import postgres from "postgres";
 import { generateHMAC } from "../crypto/hmac";
 import { assertIdentifier, quoteQualifiedIdentifier } from "../db/identifiers";
 import type { WorkerSchemas, WorkerSecrets } from "./contracts";
+import { sha256Hex } from "../utils/digest";
 
 export const DEFAULT_APP_SCHEMA = "mock_app";
 export const DEFAULT_ENGINE_SCHEMA = "dpdp_engine";
@@ -35,6 +36,8 @@ export interface OutboxRow {
   user_uuid_hash: string;
   event_type: string;
   payload: unknown;
+  previous_hash: string;
+  current_hash: string;
   status: "pending" | "leased" | "processed" | "dead_letter";
   attempt_count: number;
   lease_token: string | null;
@@ -47,6 +50,10 @@ export interface OutboxRow {
 }
 
 export type SqlExecutor = postgres.Sql | postgres.TransactionSql;
+
+interface OutboxTailRow {
+  current_hash: string | null;
+}
 
 export function resolveSchemas(input: WorkerSchemas = {}) {
   return {
@@ -154,12 +161,57 @@ export async function enqueueOutboxEvent(
   idempotencyKey: string,
   now: Date
 ): Promise<OutboxRow> {
+  const jsonPayload = payload as postgres.JSONValue;
+  const serializedPayload = JSON.stringify(jsonPayload);
+  if (serializedPayload === undefined) {
+    throw new Error("Outbox payload must be JSON-serializable.");
+  }
+
+  const [existing] = await sql<OutboxRow[]>`
+    SELECT *
+    FROM ${sql(engineSchema)}.outbox
+    WHERE idempotency_key = ${idempotencyKey}
+    LIMIT 1
+  `;
+
+  if (existing) {
+    return existing;
+  }
+
+  await sql`
+    SELECT pg_advisory_xact_lock(hashtext(${`${engineSchema}.outbox.hash_chain`}))
+  `;
+
+  const [replayed] = await sql<OutboxRow[]>`
+    SELECT *
+    FROM ${sql(engineSchema)}.outbox
+    WHERE idempotency_key = ${idempotencyKey}
+    LIMIT 1
+  `;
+
+  if (replayed) {
+    return replayed;
+  }
+
+  const [tail] = await sql<OutboxTailRow[]>`
+    SELECT current_hash
+    FROM ${sql(engineSchema)}.outbox
+    WHERE current_hash IS NOT NULL
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `;
+
+  const previousHash = tail?.current_hash ?? "GENESIS";
+  const currentHash = await sha256Hex(`${previousHash}${serializedPayload}${idempotencyKey}`);
+
   const [inserted] = await sql<OutboxRow[]>`
     INSERT INTO ${sql(engineSchema)}.outbox (
       idempotency_key,
       user_uuid_hash,
       event_type,
       payload,
+      previous_hash,
+      current_hash,
       status,
       attempt_count,
       next_attempt_at,
@@ -170,20 +222,35 @@ export async function enqueueOutboxEvent(
       ${idempotencyKey},
       ${userHash},
       ${eventType},
-      ${sql.json(payload as postgres.JSONValue)},
+      ${sql.json(jsonPayload)},
+      ${previousHash},
+      ${currentHash},
       'pending',
       0,
       ${now},
       ${now},
       ${now}
     )
-    ON CONFLICT (idempotency_key) DO UPDATE
-      SET payload = EXCLUDED.payload,
-          updated_at = EXCLUDED.updated_at
+    ON CONFLICT (idempotency_key) DO NOTHING
     RETURNING *
   `;
 
-  return inserted!;
+  if (inserted) {
+    return inserted;
+  }
+
+  const [stored] = await sql<OutboxRow[]>`
+    SELECT *
+    FROM ${sql(engineSchema)}.outbox
+    WHERE idempotency_key = ${idempotencyKey}
+    LIMIT 1
+  `;
+
+  if (!stored) {
+    throw new Error(`Outbox insert for ${idempotencyKey} completed without returning a row.`);
+  }
+
+  return stored;
 }
 
 export async function markVaultDestroyed(

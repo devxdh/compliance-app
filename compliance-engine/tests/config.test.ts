@@ -19,6 +19,7 @@ describe("Worker configuration", () => {
       DPDP_OUTBOX_MAX_ATTEMPTS: "12",
       DPDP_OUTBOX_BASE_BACKOFF_MS: "1500",
       DPDP_NOTIFICATION_LEASE_SECONDS: "180",
+      DPDP_REPLICA_DATABASE_URL: "postgres://replica:replica@replica-host:5432/postgres",
     });
 
     expect(config.appSchema).toBe("tenant_app");
@@ -31,6 +32,7 @@ describe("Worker configuration", () => {
     expect(config.outboxMaxAttempts).toBe(12);
     expect(config.outboxBaseBackoffMs).toBe(1500);
     expect(config.notificationLeaseSeconds).toBe(180);
+    expect(config.replicaDbUrl).toBe("postgres://replica:replica@replica-host:5432/postgres");
     expect(Buffer.from(config.masterKey).toString("hex")).toBe(masterKeyHex);
     expect(Buffer.from(config.hmacKey).toString("base64")).toBe(hmacKeyBase64);
   });
@@ -41,6 +43,7 @@ describe("Worker configuration", () => {
     });
 
     expect(Buffer.from(config.hmacKey).toString("hex")).toBe(masterKeyHex);
+    expect(config.replicaDbUrl).toBeUndefined();
   });
 
   it("rejects malformed keys and schema names", () => {

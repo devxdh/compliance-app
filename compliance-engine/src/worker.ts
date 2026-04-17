@@ -14,6 +14,7 @@ export interface ApiClient {
 
 export interface ComplianceWorkerOptions {
   sql: postgres.Sql;
+  sqlReplica?: postgres.Sql;
   secrets: WorkerSecrets;
   config: WorkerConfig;
   apiClient: ApiClient;
@@ -34,6 +35,7 @@ export interface ComplianceWorkerOptions {
  */
 export class ComplianceWorker {
   private sql: postgres.Sql;
+  private sqlReplica?: postgres.Sql;
   private secrets: WorkerSecrets;
   private config: WorkerConfig;
   private apiClient: ApiClient;
@@ -41,6 +43,7 @@ export class ComplianceWorker {
 
   constructor(options: ComplianceWorkerOptions) {
     this.sql = options.sql;
+    this.sqlReplica = options.sqlReplica;
     this.secrets = options.secrets;
     this.config = options.config;
     this.apiClient = options.apiClient;
@@ -77,6 +80,8 @@ export class ComplianceWorker {
             retentionYears: this.config.retentionYears,
             noticeWindowHours: this.config.noticeWindowHours,
             graphMaxDepth: this.config.graphMaxDepth,
+            shadowMode: task.payload.shadowMode,
+            sqlReplica: this.sqlReplica,
             now
           });
           break;

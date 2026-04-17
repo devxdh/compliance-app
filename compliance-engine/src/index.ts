@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { assertSchemaIntegrity } from "./bootstrap/integrity";
 import { readWorkerConfig } from "./config/worker";
 import { ComplianceWorker, type ApiClient } from "./worker";
 import { createFetchDispatcher } from "./network/outbox";
@@ -26,6 +27,15 @@ async function main() {
     idle_timeout: 20,
     connect_timeout: 10,
   });
+  const sqlReplica = config.replicaDbUrl
+    ? postgres(config.replicaDbUrl, {
+      max: 10,
+      idle_timeout: 20,
+      connect_timeout: 10,
+    })
+    : undefined;
+
+  await assertSchemaIntegrity(sql, config.appSchema, process.env.DPDP_WORKER_MANIFEST_PATH);
 
   // 3. Initialize real HTTP dispatcher for the outbox
   const pushOutboxEvent = createFetchDispatcher({
@@ -70,6 +80,7 @@ async function main() {
   // 6. Instantiate the core worker
   const worker = new ComplianceWorker({
     sql,
+    sqlReplica,
     config,
     secrets: { kek: config.masterKey, hmacKey: config.hmacKey },
     apiClient: apiClient as ApiClient,

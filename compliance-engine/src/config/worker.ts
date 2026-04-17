@@ -5,6 +5,7 @@ const KEY_LENGTH = 32;
 export interface WorkerConfig {
   appSchema: string;
   engineSchema: string;
+  replicaDbUrl?: string;
   retentionYears: number;
   noticeWindowHours: number;
   graphMaxDepth: number;
@@ -72,6 +73,7 @@ export function readWorkerConfig(env: Record<string, string | undefined> = proce
   return {
     appSchema,
     engineSchema,
+    replicaDbUrl: env.DPDP_REPLICA_DATABASE_URL?.trim() || undefined,
     retentionYears: parseInteger("DPDP_RETENTION_YEARS", env.DPDP_RETENTION_YEARS, 5, 1),
     noticeWindowHours: parseInteger("DPDP_NOTICE_WINDOW_HOURS", env.DPDP_NOTICE_WINDOW_HOURS, 48, 1),
     graphMaxDepth: parseInteger("DPDP_GRAPH_MAX_DEPTH", env.DPDP_GRAPH_MAX_DEPTH, 32, 1),

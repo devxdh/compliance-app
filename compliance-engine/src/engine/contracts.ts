@@ -1,3 +1,5 @@
+import type postgres from "postgres";
+
 export interface WorkerSecrets {
   kek: Uint8Array;
   hmacKey?: Uint8Array;
@@ -24,7 +26,10 @@ export interface DryRunPlan {
   sqlSteps: string[];
 }
 
-export interface VaultUserOptions extends WorkerSchemas, WorkerTimingOptions {}
+export interface VaultUserOptions extends WorkerSchemas, WorkerTimingOptions {
+  shadowMode?: boolean;
+  sqlReplica?: postgres.Sql;
+}
 
 export interface DispatchNoticeOptions extends WorkerSchemas, WorkerTimingOptions {
   notificationLeaseSeconds?: number;

@@ -137,6 +137,44 @@ describe("Vault Engine (Atomic State Machine)", () => {
     expect(outboxRows).toHaveLength(0);
   });
 
+  it("supports shadow mode by validating the full pipeline and rolling back all writes", async () => {
+    const { appSchema, engineSchema } = await prepare({ withDependencies: true });
+    const userId = await insertUser(sql, appSchema, "shadow@example.com", "Shadow User");
+
+    const result = await vaultUser(sql, userId, TEST_SECRETS, {
+      appSchema,
+      engineSchema,
+      shadowMode: true,
+      now: new Date("2026-01-10T00:00:00.000Z"),
+    });
+
+    expect(result.action).toBe("vaulted");
+    expect(result.dryRun).toBe(false);
+
+    const [publicUser] = await sql<{ email: string; full_name: string }[]>`
+      SELECT email, full_name
+      FROM ${sql(appSchema)}.users
+      WHERE id = ${userId}
+    `;
+    const vaultRows = await sql`
+      SELECT *
+      FROM ${sql(engineSchema)}.pii_vault
+      WHERE root_schema = ${appSchema}
+        AND root_table = 'users'
+        AND root_id = ${userId.toString()}
+    `;
+    const outboxRows = await sql`
+      SELECT *
+      FROM ${sql(engineSchema)}.outbox
+      WHERE idempotency_key = ${`vault:${appSchema}:users:${userId}`}
+    `;
+
+    expect(publicUser?.email).toBe("shadow@example.com");
+    expect(publicUser?.full_name).toBe("Shadow User");
+    expect(vaultRows).toHaveLength(0);
+    expect(outboxRows).toHaveLength(0);
+  });
+
   it("rolls back cleanly when the vault insert collides with an existing hash", async () => {
     const { appSchema, engineSchema } = await prepare({ withDependencies: true });
     const userId = await insertUser(sql, appSchema, "jane.smith@example.com", "Jane Smith");

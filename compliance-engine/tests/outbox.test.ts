@@ -3,6 +3,7 @@ import postgres from "postgres";
 import { runMigrations } from "../src/db/migrations";
 import { calculateRetryDelayMs, processOutbox } from "../src/network/outbox";
 import type { OutboxEvent } from "../src/network/outbox";
+import { enqueueOutboxEvent } from "../src/engine/support";
 import { createTestSql, dropSchemas, uniqueSchema } from "./helpers/db";
 
 describe("Network Outbox Relay", () => {
@@ -39,6 +40,8 @@ describe("Network Outbox Relay", () => {
         user_uuid_hash,
         event_type,
         payload,
+        previous_hash,
+        current_hash,
         status,
         attempt_count,
         next_attempt_at,
@@ -50,6 +53,8 @@ describe("Network Outbox Relay", () => {
         ${userHash},
         ${eventType},
         '{}'::jsonb,
+        'GENESIS',
+        ${`${idempotencyKey}-hash`},
         'pending',
         0,
         ${nextAttemptAt},
@@ -75,6 +80,117 @@ describe("Network Outbox Relay", () => {
     const rows = await sql`SELECT status, processed_at FROM ${sql(engineSchema)}.outbox ORDER BY idempotency_key ASC`;
     expect(rows.every((row) => row.status === "processed")).toBe(true);
     expect(rows.every((row) => row.processed_at !== null)).toBe(true);
+  });
+
+  it("chains outbox events with tamper-evident hashes", async () => {
+    const { engineSchema } = await prepare();
+    const now = new Date("2026-04-15T00:00:00.000Z");
+    const next = new Date("2026-04-15T00:00:01.000Z");
+
+    const first = await sql.begin((tx) =>
+      enqueueOutboxEvent(
+        tx,
+        engineSchema,
+        "user-hash-1",
+        "USER_VAULTED",
+        { rootId: "1", state: "vaulted" },
+        "vault:tenant:users:1",
+        now
+      )
+    );
+
+    const second = await sql.begin((tx) =>
+      enqueueOutboxEvent(
+        tx,
+        engineSchema,
+        "user-hash-2",
+        "NOTIFICATION_SENT",
+        { rootId: "2", state: "notified" },
+        "notice:tenant:users:2",
+        next
+      )
+    );
+
+    const expectedFirstBuffer = await globalThis.crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(`GENESIS${JSON.stringify({ rootId: "1", state: "vaulted" })}vault:tenant:users:1`)
+    );
+    const expectedFirstHash = Buffer.from(expectedFirstBuffer).toString("hex");
+    const expectedSecondBuffer = await globalThis.crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(
+        `${expectedFirstHash}${JSON.stringify({ rootId: "2", state: "notified" })}notice:tenant:users:2`
+      )
+    );
+    const expectedSecondHash = Buffer.from(expectedSecondBuffer).toString("hex");
+
+    expect(first.previous_hash).toBe("GENESIS");
+    expect(first.current_hash).toBe(expectedFirstHash);
+    expect(second.previous_hash).toBe(expectedFirstHash);
+    expect(second.current_hash).toBe(expectedSecondHash);
+
+    const rows = await sql`
+      SELECT idempotency_key, previous_hash, current_hash
+      FROM ${sql(engineSchema)}.outbox
+      ORDER BY created_at ASC, id ASC
+    `;
+
+    expect(rows).toEqual([
+      {
+        idempotency_key: "vault:tenant:users:1",
+        previous_hash: "GENESIS",
+        current_hash: expectedFirstHash,
+      },
+      {
+        idempotency_key: "notice:tenant:users:2",
+        previous_hash: expectedFirstHash,
+        current_hash: expectedSecondHash,
+      },
+    ]);
+  });
+
+  it("returns the existing hashed row on idempotent replay without mutating the chain", async () => {
+    const { engineSchema } = await prepare();
+    const now = new Date("2026-04-15T00:00:00.000Z");
+
+    const first = await sql.begin((tx) =>
+      enqueueOutboxEvent(
+        tx,
+        engineSchema,
+        "user-hash-1",
+        "USER_VAULTED",
+        { rootId: "1", state: "vaulted" },
+        "vault:tenant:users:1",
+        now
+      )
+    );
+
+    const replay = await sql.begin((tx) =>
+      enqueueOutboxEvent(
+        tx,
+        engineSchema,
+        "user-hash-1",
+        "USER_VAULTED",
+        { rootId: "1", state: "mutated" },
+        "vault:tenant:users:1",
+        new Date("2026-04-15T00:00:30.000Z")
+      )
+    );
+
+    expect(replay.id).toBe(first.id);
+    expect(replay.previous_hash).toBe(first.previous_hash);
+    expect(replay.current_hash).toBe(first.current_hash);
+
+    const rows = await sql`
+      SELECT payload, previous_hash, current_hash
+      FROM ${sql(engineSchema)}.outbox
+      WHERE idempotency_key = 'vault:tenant:users:1'
+    `;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.payload).toEqual({ rootId: "1", state: "vaulted" });
+    expect(rows[0]?.previous_hash).toBe("GENESIS");
+    expect(rows[0]?.current_hash).toBe(first.current_hash);
   });
 
   it("requeues failed events with backoff and error context", async () => {
@@ -185,6 +301,8 @@ describe("Network Outbox Relay", () => {
         user_uuid_hash,
         event_type,
         payload,
+        previous_hash,
+        current_hash,
         status,
         attempt_count,
         lease_token,
@@ -198,6 +316,8 @@ describe("Network Outbox Relay", () => {
         'user8',
         'LEASED_EVENT',
         '{}'::jsonb,
+        'GENESIS',
+        'event-8-hash',
         'leased',
         2,
         gen_random_uuid(),

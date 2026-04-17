@@ -88,6 +88,8 @@ export async function runMigrations(sql: postgres.Sql, engineSchema: string = "d
         user_uuid_hash TEXT NOT NULL,
         event_type VARCHAR(50) NOT NULL,
         payload JSONB NOT NULL,
+        previous_hash TEXT NOT NULL,
+        current_hash TEXT NOT NULL,
         status VARCHAR(20) NOT NULL DEFAULT 'pending',
         attempt_count INTEGER NOT NULL DEFAULT 0,
         lease_token UUID,
@@ -104,6 +106,8 @@ export async function runMigrations(sql: postgres.Sql, engineSchema: string = "d
     await tx`
       ALTER TABLE ${tx(safeEngineSchema)}.outbox
       ADD COLUMN IF NOT EXISTS idempotency_key TEXT,
+      ADD COLUMN IF NOT EXISTS previous_hash TEXT,
+      ADD COLUMN IF NOT EXISTS current_hash TEXT,
       ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'pending',
       ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0,
       ADD COLUMN IF NOT EXISTS lease_token UUID,
@@ -122,6 +126,13 @@ export async function runMigrations(sql: postgres.Sql, engineSchema: string = "d
     await tx`
       CREATE INDEX IF NOT EXISTS outbox_due_events_idx
       ON ${tx(safeEngineSchema)}.outbox (status, next_attempt_at, created_at)
+    `;
+
+    await tx`
+      CREATE INDEX IF NOT EXISTS outbox_chain_tail_idx
+      ON ${tx(safeEngineSchema)}.outbox (created_at DESC, id DESC)
+      INCLUDE (current_hash)
+      WHERE current_hash IS NOT NULL
     `;
   });
 
