@@ -1,9 +1,18 @@
 /**
  * MODULE 1.1: ENVELOPE ENCRYPTION (THE VAULT)
- * Pattern: KEK (Key Encrypting Key) / DEK (Data Encrypting Key)
  * 
- * The KEK lives ONLY in RAM (Master Key from Env). 
- * The DEK is used to encrypt user data and is itself encrypted by the KEK.
+ * Layman Terms:
+ * The Master Safe. Imagine millions of titanium safes. If you store the keys next to them, 
+ * a thief gets everything. Instead, you put all the millions of smaller keys inside one Master Safe. 
+ * The combination to the Master Safe is in your brain. If hackers steal the warehouse (database), 
+ * they just get locked safes and locked keys. Because the Master Combination is in your brain 
+ * (server RAM), they get nothing.
+ *
+ * Technical Terms:
+ * Implements the Two-Tier KEK/DEK Architecture.
+ * KEK (Key Encrypting Key) lives only in RAM (via Env Variables).
+ * DEK (Data Encrypting Key) is a unique per-user key generated and then encrypted by the KEK 
+ * before persistence. This isolates symmetric keys from the database, enabling $O(1)$ crypto-shredding.
  */
 
 import { encryptGCM, decryptGCM } from "./aes";

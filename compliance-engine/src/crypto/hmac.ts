@@ -1,10 +1,17 @@
 /**
  * MODULE 1.2: HMAC PSEUDONYMIZATION
- * Pattern: HMAC-SHA256
- * 
- * Used for one-way masking of user identities. 
- * Allows the system to group records belonging to the same user 
- * without knowing who the user is.
+ *
+ * Layman Terms:
+ * The One-Way Meat Grinder. You put a steak in ("John Doe"), turn the handle, and out comes 
+ * ground beef ("A8F9B2..."). You can never shove the ground beef back through to get the steak back. 
+ * If you put the exact same steak in tomorrow, it produces the exact same ground beef, so we can 
+ * connect financial orders together without knowing who it is. We add a secret spice (the "salt") 
+ * so hackers can't use a dictionary to guess what went in.
+ *
+ * Technical Terms:
+ * Provides Deterministic One-Way Hashing via HMAC-SHA256.
+ * Salted pseudonyms prevent Rainbow Table and Dictionary attacks while ensuring stable 
+ * database lookups. Enables safe, irreversible primary key replacement in the `users` table.
  */
 
 /**

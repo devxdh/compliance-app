@@ -1,10 +1,16 @@
 /**
  * MODULE 1: THE CRYPTOGRAPHIC CORE (THE SAFE)
- * Standard: AES-256-GCM (Authenticated Encryption)
- * 
- * Why GCM? Unlike older modes, GCM provides "Integrity." 
- * If a hacker tries to modify the encrypted data (even by 1 bit), 
- * the decryption will fail immediately.
+ *
+ * Layman Terms:
+ * Imagine a titanium safe (AES-256). But what if a hacker sneaks in, can't open it, 
+ * but hits it with a hammer to ruin what's inside? "GCM" is like a magical tamper-evident seal. 
+ * When you try to open the safe later, the seal checks if anyone scratched the outside. 
+ * If it detects tampering, the safe jams and refuses to open.
+ *
+ * Technical Terms:
+ * Implements AES-256-GCM. GCM (Galois/Counter Mode) provides Authenticated Encryption 
+ * with Associated Data (AEAD), guaranteeing both Confidentiality and Integrity. 
+ * It appends a 16-byte Auth Tag to the ciphertext to instantly fail decryption if tampered with.
  */
 
 const IV_LENGTH = 12; // 96-bit IV is the industry standard for GCM.

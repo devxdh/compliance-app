@@ -51,11 +51,16 @@ function decodeKey(rawValue: string, envName: string): Uint8Array {
 }
 
 /**
- * Reads and validates the worker's environment in one place.
+ * Layman Terms:
+ * The Bouncer. When the worker tries to start up, the Bouncer checks its pockets. 
+ * Did it bring the Master Key? Are the settings for the safes (the schemas) valid?
+ * If the worker forgot its keys or brought the wrong ones, the Bouncer shuts the whole 
+ * factory down immediately. It's better to stay closed than to operate with bad security.
  *
- * 
- * The worker should crash early if a secret or schema name is wrong. That is
- * safer than starting with a bad config and damaging customer data later.
+ * Technical Terms:
+ * Validates and decodes environment variables synchronously at startup (Fail-Fast).
+ * Enforces cryptographic constraints (32-byte keys, hex/base64 formats) and schema name 
+ * validity, mitigating downstream data corruption or unauthorized state.
  */
 export function readWorkerConfig(env: Record<string, string | undefined> = process.env): WorkerConfig {
   const appSchema = assertIdentifier(env.DPDP_APP_SCHEMA ?? "mock_app", "application schema name");

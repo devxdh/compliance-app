@@ -44,10 +44,14 @@ function resolveMaxDepth(input?: number): number {
 }
 
 /**
+ * Layman Terms:
+ * Triggers the magic map-making spell. If the database tells us the map is too big
+ * (hits our max limit), we assume something is wrong (like a circular family tree)
+ * and we crash, instead of deleting things blindly.
+ * 
+ * Technical Terms:
  * Returns the transitive foreign-key graph for a root table.
- *
- * Safety note:
- * We intentionally fail when the traversal touches the configured max depth.
+ * Safety note: We intentionally fail when the traversal touches the configured max depth.
  * That is conservative, but it avoids silently operating on a partial graph.
  */
 export async function getDependencyGraph(

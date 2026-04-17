@@ -209,8 +209,16 @@ async function markOutboxEventFailed(
 }
 
 /**
- * Claims a batch of due events, dispatches them, and updates their delivery
- * state with retries and dead-letter handling.
+ * Layman Terms:
+ * Grabs a stack of postcards from the "send later" tray. For each postcard, it drives 
+ * to Headquarters (the API). If Headquarters signs for it, it throws the postcard away.
+ * If the bridge is out, it puts the postcard back in the tray with a note saying 
+ * "Try again tomorrow".
+ * 
+ * Technical Terms:
+ * Claims a batch of due events via `claimOutboxBatch`, dispatches them using the injected
+ * `syncFn` transport, and executes follow-up transactions to update their delivery
+ * state with exponential retries and dead-letter handling.
  */
 export async function processOutbox(
   sql: postgres.Sql,

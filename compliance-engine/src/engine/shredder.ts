@@ -47,7 +47,14 @@ function buildShredDryRunPlan(appSchema: string, engineSchema: string, userId: n
 }
 
 /**
- * Performs Stage 4 Crypto-Shredding for a user.
+ * Layman Terms:
+ * Triggers the "Kill Switch" for a user. It throws away their DEK, rendering the vault forever 
+ * un-openable, and leaves a "destroyed" sticker on the vault so we know it's gone.
+ * 
+ * Technical Terms:
+ * Stage 4 Crypto-Shredding. Locks the vault row, asserts retention expiry, deletes the DEK, 
+ * updates the `pii_vault` with a `{ destroyed: true }` marker, and queues a `SHRED_SUCCESS` 
+ * event to notify the Central API, all inside a `REPEATABLE READ` transaction.
  */
 export async function shredUser(
   sql: postgres.Sql,

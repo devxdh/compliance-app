@@ -1,15 +1,18 @@
 /**
- * MODULE 3.1: SCHEMA MIGRATIONS
+ * Layman Terms:
+ * Building the Security Room. Before the guard can work, they build a locked, private 
+ * security room inside the main building. In this room, they build three things:
+ * 1. The Vault (where names and emails are locked).
+ * 2. The Key Cabinet (where physical keys to the vaults are stored).
+ * 3. The Mailroom Outbox (a tray for notes to the mailman).
  *
- * Expert view:
- * The worker cannot be production-grade if its local schema only stores
- * ciphertext and a boolean "processed" flag. We persist the metadata required
- * for idempotency, leasing, retries, and auditability directly in PostgreSQL.
- *
- * Layman view:
- * These migrations create the worker's own "control tables" inside the client
- * database. They remember what was vaulted, whether a notice was sent, and
- * whether an API event still needs to be retried later.
+ * Technical Terms:
+ * Provisions the internal state schema (`dpdp_engine`).
+ * Creates `pii_vault` for durable state machine timestamps and encrypted PII.
+ * Creates `user_keys` with `ON DELETE CASCADE` attached to the vault to ensure 
+ * foreign-key-based crypto-shredding capability. 
+ * Creates `outbox` for the Transactional Outbox pattern, with indexes optimized 
+ * for queue polling (retries and leases).
  */
 
 import postgres from "postgres";

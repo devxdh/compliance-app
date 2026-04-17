@@ -170,7 +170,15 @@ async function clearNoticeLease(
 }
 
 /**
- * Dispatches the pre-erasure notice securely.
+ * Layman Terms:
+ * This tells the worker to grab the warning sticky notes, reserve the safe for itself,
+ * unlock it, find the email, mail the user, and write "Mailed!" on the safe.
+ * 
+ * Technical Terms:
+ * Performs an idempotent reservation using a UUID-based timestamp lock. Retrieves the
+ * stored ciphertext, uses `unwrapKey` to fetch the DEK, and decrypts the PII. Invokes
+ * the MockMailer. Emits the `NOTIFICATION_SENT` outbox payload in a transaction that
+ * clears the local lock.
  */
 export async function dispatchPreErasureNotice(
   sql: postgres.Sql,

@@ -88,11 +88,15 @@ function buildVaultDryRunPlan(
 }
 
 /**
- * Performs Stage 1 vaulting for a user.
- *
- * The function returns a structured result rather than `void` so higher-level
- * worker code can tell whether it vaulted, skipped, or only produced a dry-run
- * plan.
+ * Layman Terms:
+ * Executes the "Hide the User" operation. It looks at the user, figures out if they have any 
+ * connected records (like past orders). If they don't, it just deletes them instantly. If they do, 
+ * it encrypts them, creates a fake ID, and updates the database all at once.
+ * 
+ * Technical Terms:
+ * Idempotently vaults or hard-deletes a user based on their relational footprint.
+ * Returns a structured result detailing the exact state transition (e.g., `vaulted`, `hard_deleted`, 
+ * `already_vaulted`) so orchestrators can handle the outcome symmetrically.
  */
 export async function vaultUser(
   sql: postgres.Sql,
