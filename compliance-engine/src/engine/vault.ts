@@ -61,29 +61,29 @@ function buildVaultDryRunPlan(
       dependencyCount === 0
         ? ["No vaulting cryptography required because the root table has no dependent tables."]
         : [
-            "Generate a one-time 32-byte DEK for the user.",
-            "Encrypt the JSON PII payload with AES-256-GCM.",
-            "Wrap the DEK with the worker KEK using envelope encryption.",
-            "Generate an HMAC-backed pseudonym for the visible user record.",
-          ],
+          "Generate a one-time 32-byte DEK for the user.",
+          "Encrypt the JSON PII payload with AES-256-GCM.",
+          "Wrap the DEK with the worker KEK using envelope encryption.",
+          "Generate an HMAC-backed pseudonym for the visible user record.",
+        ],
     sqlSteps:
       dependencyCount === 0
         ? [
-            `BEGIN ISOLATION LEVEL REPEATABLE READ;`,
-            `SELECT id, email, full_name FROM ${userTable} WHERE id = ${userId} FOR UPDATE;`,
-            `DELETE FROM ${userTable} WHERE id = ${userId};`,
-            `INSERT INTO ${outboxTable} (...) VALUES (... 'USER_HARD_DELETED' ...);`,
-            `COMMIT;`,
-          ]
+          `BEGIN ISOLATION LEVEL REPEATABLE READ;`,
+          `SELECT id, email, full_name FROM ${userTable} WHERE id = ${userId} FOR UPDATE;`,
+          `DELETE FROM ${userTable} WHERE id = ${userId};`,
+          `INSERT INTO ${outboxTable} (...) VALUES (... 'USER_HARD_DELETED' ...);`,
+          `COMMIT;`,
+        ]
         : [
-            `BEGIN ISOLATION LEVEL REPEATABLE READ;`,
-            `SELECT id, email, full_name FROM ${userTable} WHERE id = ${userId} FOR UPDATE;`,
-            `INSERT INTO ${vaultTable} (... retention_expiry='${retentionExpiry.toISOString()}', notification_due_at='${notificationDueAt.toISOString()}');`,
-            `INSERT INTO ${keyTable} (...);`,
-            `UPDATE ${userTable} SET email = '<pseudonym>', full_name = '<pseudonymized label>' WHERE id = ${userId};`,
-            `INSERT INTO ${outboxTable} (...) VALUES (... 'USER_VAULTED' ...);`,
-            `COMMIT;`,
-          ],
+          `BEGIN ISOLATION LEVEL REPEATABLE READ;`,
+          `SELECT id, email, full_name FROM ${userTable} WHERE id = ${userId} FOR UPDATE;`,
+          `INSERT INTO ${vaultTable} (... retention_expiry='${retentionExpiry.toISOString()}', notification_due_at='${notificationDueAt.toISOString()}');`,
+          `INSERT INTO ${keyTable} (...);`,
+          `UPDATE ${userTable} SET email = '<pseudonym>', full_name = '<pseudonymized label>' WHERE id = ${userId};`,
+          `INSERT INTO ${outboxTable} (...) VALUES (... 'USER_VAULTED' ...);`,
+          `COMMIT;`,
+        ],
   };
 }
 
@@ -92,8 +92,7 @@ function buildVaultDryRunPlan(
  * Executes the "Hide the User" operation. It looks at the user, figures out if they have any 
  * connected records (like past orders). If they don't, it just deletes them instantly. If they do, 
  * it encrypts them, creates a fake ID, and updates the database all at once.
- * 
- * Technical Terms:
+ * * Technical Terms:
  * Idempotently vaults or hard-deletes a user based on their relational footprint.
  * Returns a structured result detailing the exact state transition (e.g., `vaulted`, `hard_deleted`, 
  * `already_vaulted`) so orchestrators can handle the outcome symmetrically.
@@ -114,30 +113,15 @@ export async function vaultUser(
   const noticeWindowHours = resolveNoticeWindowHours(options.noticeWindowHours);
   const graphMaxDepth = resolveGraphMaxDepth(options.graphMaxDepth);
   const now = options.now ? new Date(options.now) : new Date();
-  const dependencies = await getDependencyGraph(sql, appSchema, "users", { maxDepth: graphMaxDepth });
-  const dependencyCount = dependencies.length;
   const userHash = await createUserHash(userId, appSchema, hmacKey);
-  const { retentionExpiry, notificationDueAt } = calculateRetentionWindow(now, retentionYears, noticeWindowHours);
 
-  const [existingUser] = await sql<{ id: number; email: string; full_name: string }[]>`
-    SELECT id, email, full_name
-    FROM ${sql(appSchema)}.users
-    WHERE id = ${userId}
-  `;
-
-  const existingVault = await getVaultRecordByUserId(sql, engineSchema, appSchema, userId);
-  const existingHardDeleteEvent = await sql<{ id: string }[]>`
-    SELECT id
-    FROM ${sql(engineSchema)}.outbox
-    WHERE idempotency_key = ${`hard-delete:${appSchema}:users:${userId}`}
-    LIMIT 1
-  `;
-
-  if (!existingUser && !existingVault && existingHardDeleteEvent.length === 0) {
-    throw new Error(`User ${userId} not found in ${appSchema}.users and no prior worker state exists.`);
-  }
-
+  // --- DRY RUN MODE (Executes Graph calculation outside transaction lock) ---
   if (options.dryRun) {
+    const dependencies = await getDependencyGraph(sql, appSchema, "users", { maxDepth: graphMaxDepth });
+    const dependencyCount = dependencies.length;
+    const { retentionExpiry, notificationDueAt } = calculateRetentionWindow(now, retentionYears, noticeWindowHours);
+    const existingVault = await getVaultRecordByUserId(sql, engineSchema, appSchema, userId);
+
     return {
       action: "dry_run",
       userHash,
@@ -153,11 +137,13 @@ export async function vaultUser(
 
   console.log(`--- VAULTING USER #${userId} IN SCHEMA ${appSchema} ---`);
 
-  let dek: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
-  let encryptedPiiBuffer: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+  // Type Issue Fixed: Removed the invalid generic <ArrayBufferLike> constraint
+  let dek: Uint8Array = new Uint8Array(0);
+  let encryptedPiiBuffer: Uint8Array = new Uint8Array(0);
 
   try {
     return await sql.begin("isolation level repeatable read", async (tx) => {
+      // 1. LOCK THE ROOT ROW FIRST to establish the snapshot and prevent concurrent mutations
       const [lockedUser] = await tx<{ id: number; email: string; full_name: string }[]>`
         SELECT id, email, full_name
         FROM ${tx(appSchema)}.users
@@ -165,6 +151,7 @@ export async function vaultUser(
         FOR UPDATE
       `;
 
+      // 2. Validate Idempotency state within the snapshot
       const lockedVault = await getVaultRecordByUserId(tx, engineSchema, appSchema, userId);
       if (lockedVault) {
         return {
@@ -203,6 +190,12 @@ export async function vaultUser(
         throw new Error(`User ${userId} disappeared before vaulting could begin.`);
       }
 
+      // 3. EXECUTE GRAPH TRAVERSAL INSIDE THE SNAPSHOT to resolve TOCTOU race conditions
+      const dependencies = await getDependencyGraph(tx, appSchema, "users", { maxDepth: graphMaxDepth });
+      const dependencyCount = dependencies.length;
+      const { retentionExpiry, notificationDueAt } = calculateRetentionWindow(now, retentionYears, noticeWindowHours);
+
+      // 4. Branch Logic based on Deterministic Dependency Count
       if (dependencyCount === 0) {
         const deleted = await tx`
           DELETE FROM ${tx(appSchema)}.users
@@ -242,6 +235,7 @@ export async function vaultUser(
         };
       }
 
+      // 5. Vaulting and Encryption Pipeline
       const salt = Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(16))).toString("hex");
       const pseudonym = await createPseudonym(userId, lockedUser.email, salt, hmacKey);
 
@@ -334,6 +328,7 @@ export async function vaultUser(
       };
     });
   } finally {
+    // Shred the unencrypted arrays from Node process memory immediately upon finish/error
     if (dek.length > 0) {
       dek.fill(0);
     }

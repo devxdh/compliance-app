@@ -55,7 +55,7 @@ function resolveMaxDepth(input?: number): number {
  * That is conservative, but it avoids silently operating on a partial graph.
  */
 export async function getDependencyGraph(
-  sql: postgres.Sql,
+  sql: postgres.Sql | postgres.TransactionSql,
   schema: string,
   rootTable: string,
   options: DependencyGraphOptions = {}
