@@ -7,3 +7,4 @@ treemaker
 sessions
 *.tsbuildinfo
 .DS_Store
+**/.codex
