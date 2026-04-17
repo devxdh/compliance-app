@@ -3,5 +3,7 @@ node_modules
 coverage
 .vitest
 dist
+treemaker
+sessions
 *.tsbuildinfo
 .DS_Store
