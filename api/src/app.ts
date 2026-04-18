@@ -9,6 +9,8 @@ export interface CreateAppOptions {
   sql: postgres.Sql;
   controlSchema: string;
   signer: CoeSigner;
+  workerSharedSecret: string;
+  maxOutboxPayloadBytes?: number;
   taskLeaseSeconds?: number;
 }
 
@@ -25,6 +27,8 @@ export function createApp(options: CreateAppOptions) {
   const service = new ControlPlaneService({
     repository,
     signer: options.signer,
+    workerSharedSecret: options.workerSharedSecret,
+    maxOutboxPayloadBytes: options.maxOutboxPayloadBytes ?? 32_768,
   });
 
   app.get("/health", (c) => c.json({ ok: true }, 200));
@@ -32,4 +36,3 @@ export function createApp(options: CreateAppOptions) {
 
   return app;
 }
-

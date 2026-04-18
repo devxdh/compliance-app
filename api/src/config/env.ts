@@ -5,6 +5,8 @@ const envSchema = z.object({
   API_CONTROL_SCHEMA: z.string().min(1).default("dpdp_control"),
   PORT: z.coerce.number().int().positive().default(3000),
   WORKER_TASK_LEASE_SECONDS: z.coerce.number().int().positive().default(60),
+  WORKER_SHARED_SECRET: z.string().min(1).default("worker-secret"),
+  MAX_OUTBOX_PAYLOAD_BYTES: z.coerce.number().int().positive().default(32768),
   COE_KEY_ID: z.string().min(1).default("control-plane-ed25519-v1"),
   COE_PRIVATE_KEY_PKCS8_BASE64: z.string().min(1).optional(),
   COE_PUBLIC_KEY_SPKI_BASE64: z.string().min(1).optional(),
@@ -18,4 +20,3 @@ export type ApiEnv = z.infer<typeof envSchema>;
 export function readApiEnv(env: Record<string, string | undefined> = process.env): ApiEnv {
   return envSchema.parse(env);
 }
-

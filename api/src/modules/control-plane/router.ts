@@ -15,6 +15,16 @@ import type { ControlPlaneService } from "./service";
 export function createControlPlaneRouter(service: ControlPlaneService) {
   const router = new Hono();
 
+  async function authorizeWorker(headers: { "x-client-id": string; authorization: string }) {
+    const token = headers.authorization.replace(/^Bearer\s+/i, "");
+    const clientId = await service.authorizeWorker(headers["x-client-id"], token);
+    if (!clientId) {
+      throw new HTTPException(401, { message: "invalid worker credentials" });
+    }
+
+    return clientId;
+  }
+
   router.post("/erasure-requests", zValidator("json", createErasureRequestSchema), async (c) => {
     const payload = c.req.valid("json");
     const created = await service.createErasureRequest(payload);
@@ -23,18 +33,26 @@ export function createControlPlaneRouter(service: ControlPlaneService) {
 
   router.get("/worker/sync", zValidator("header", workerHeaderSchema), async (c) => {
     const header = c.req.valid("header");
-    const synced = await service.syncWorker(header["x-client-id"]);
+    const clientId = await authorizeWorker(header);
+    const synced = await service.syncWorker(header["x-client-id"], clientId);
     return c.json(synced, 200);
   });
 
-  router.post("/worker/tasks/:taskId/ack", zValidator("json", workerAckSchema), async (c) => {
-    const result = await service.ackWorkerTask(c.req.param("taskId"), c.req.valid("json"));
-    if (!result) {
-      throw new HTTPException(404, { message: "task not found" });
-    }
+  router.post(
+    "/worker/tasks/:taskId/ack",
+    zValidator("header", workerHeaderSchema),
+    zValidator("json", workerAckSchema),
+    async (c) => {
+      const header = c.req.valid("header");
+      await authorizeWorker(header);
+      const result = await service.ackWorkerTask(c.req.param("taskId"), c.req.valid("json"));
+      if (!result) {
+        throw new HTTPException(404, { message: "task not found" });
+      }
 
-    return c.json({ ok: true, ...result }, 200);
-  });
+      return c.json({ ok: true, ...result }, 200);
+    }
+  );
 
   router.post(
     "/worker/outbox",
@@ -42,9 +60,14 @@ export function createControlPlaneRouter(service: ControlPlaneService) {
     zValidator("json", workerOutboxEventSchema),
     async (c) => {
       try {
-        const result = await service.ingestWorkerOutbox(c.req.valid("json"));
+        const header = c.req.valid("header");
+        const clientId = await authorizeWorker(header);
+        const result = await service.ingestWorkerOutbox(c.req.valid("json"), clientId);
         return c.json(result, 202);
       } catch (error) {
+        if (error instanceof HTTPException) {
+          throw error;
+        }
         const message = error instanceof Error ? error.message : "invalid outbox event";
         throw new HTTPException(400, { message });
       }
@@ -77,4 +100,3 @@ export function createControlPlaneRouter(service: ControlPlaneService) {
 
   return router;
 }
-
