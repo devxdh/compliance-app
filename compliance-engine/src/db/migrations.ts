@@ -17,11 +17,14 @@
 
 import postgres from "postgres";
 import { assertIdentifier } from "./identifiers";
+import { getLogger } from "../observability/logger";
+
+const logger = getLogger({ component: "migrations" });
 
 export async function runMigrations(sql: postgres.Sql, engineSchema: string = "dpdp_engine") {
   const safeEngineSchema = assertIdentifier(engineSchema, "engine schema name");
 
-  console.log(`--- PROVISIONING DPDP ENGINE SCHEMA (${safeEngineSchema}) ---`);
+  logger.info({ engineSchema: safeEngineSchema }, "Provisioning DPDP engine schema");
 
   await sql.begin(async (tx) => {
     await tx`CREATE EXTENSION IF NOT EXISTS pgcrypto`;
@@ -136,5 +139,5 @@ export async function runMigrations(sql: postgres.Sql, engineSchema: string = "d
     `;
   });
 
-  console.log(`[SUCCESS]: DPDP Engine schema provisioned in ${safeEngineSchema}.`);
+  logger.info({ engineSchema: safeEngineSchema }, "DPDP engine schema provisioned");
 }

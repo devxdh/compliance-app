@@ -35,12 +35,27 @@ describe("Vault Engine (Atomic State Machine)", () => {
     return { appSchema, engineSchema };
   }
 
+  function buildVaultOptions(appSchema: string, engineSchema: string, now?: Date) {
+    return {
+      appSchema,
+      engineSchema,
+      now,
+      rootTable: "users",
+      rootIdColumn: "id",
+      rootPiiColumns: {
+        email: "HMAC" as const,
+        full_name: "STATIC_MASK" as const,
+      },
+      satelliteTargets: [],
+    };
+  }
+
   it("vaults, pseudonymizes, and keeps the original PII decryptable with the KEK", async () => {
     const { appSchema, engineSchema } = await prepare({ withDependencies: true });
     const now = new Date("2026-01-10T00:00:00.000Z");
     const userId = await insertUser(sql, appSchema, "john.doe@example.com", "John Doe");
 
-    const result = await vaultUser(sql, userId, TEST_SECRETS, { appSchema, engineSchema, now });
+    const result = await vaultUser(sql, userId, TEST_SECRETS, buildVaultOptions(appSchema, engineSchema, now));
     expect(result.action).toBe("vaulted");
     expect(result.userHash).toHaveLength(64);
     expect(result.pseudonym).toMatch(/@dpdp\.invalid$/);
@@ -52,8 +67,8 @@ describe("Vault Engine (Atomic State Machine)", () => {
       WHERE id = ${userId}
     `;
 
-    expect(publicUser?.email).toBe(result.pseudonym);
-    expect(publicUser?.full_name).toContain("PSEUDONYMIZED_");
+    expect(publicUser?.email).toMatch(/^[0-9a-f]{64}$/);
+    expect(publicUser?.full_name).toBe("[REDACTED]");
 
     const [vaultRow] = await sql`
       SELECT *
@@ -70,7 +85,7 @@ describe("Vault Engine (Atomic State Machine)", () => {
     const [outboxRow] = await sql`
       SELECT *
       FROM ${sql(engineSchema)}.outbox
-      WHERE idempotency_key = ${`vault:${appSchema}:users:${userId}`}
+      WHERE idempotency_key = ${`vault:${appSchema}:users:id:${userId}`}
     `;
 
     expect(vaultRow?.user_uuid_hash).toBe(result.userHash);
@@ -97,7 +112,7 @@ describe("Vault Engine (Atomic State Machine)", () => {
     const { appSchema, engineSchema } = await prepare({ withDependencies: false });
     const userId = await insertUser(sql, appSchema, "delete.me@example.com", "Delete Me");
 
-    const result = await vaultUser(sql, userId, TEST_SECRETS, { appSchema, engineSchema });
+    const result = await vaultUser(sql, userId, TEST_SECRETS, buildVaultOptions(appSchema, engineSchema));
     expect(result.action).toBe("hard_deleted");
     expect(result.dependencyCount).toBe(0);
 
@@ -106,7 +121,7 @@ describe("Vault Engine (Atomic State Machine)", () => {
     const [outboxRow] = await sql`
       SELECT *
       FROM ${sql(engineSchema)}.outbox
-      WHERE idempotency_key = ${`hard-delete:${appSchema}:users:${userId}`}
+      WHERE idempotency_key = ${`hard-delete:${appSchema}:users:id:${userId}`}
     `;
 
     expect(remainingUsers).toHaveLength(0);
@@ -119,14 +134,12 @@ describe("Vault Engine (Atomic State Machine)", () => {
     const userId = await insertUser(sql, appSchema, "preview@example.com", "Preview User");
 
     const result = await vaultUser(sql, userId, TEST_SECRETS, {
-      appSchema,
-      engineSchema,
+      ...buildVaultOptions(appSchema, engineSchema, new Date("2026-01-10T00:00:00.000Z")),
       dryRun: true,
-      now: new Date("2026-01-10T00:00:00.000Z"),
     });
 
     expect(result.action).toBe("dry_run");
-    expect(result.plan?.summary).toContain(`user ${userId}`);
+    expect(result.plan?.summary).toContain(`root row ${userId}`);
 
     const [publicUser] = await sql`SELECT email, full_name FROM ${sql(appSchema)}.users WHERE id = ${userId}`;
     const vaultRows = await sql`SELECT * FROM ${sql(engineSchema)}.pii_vault WHERE root_id = ${userId.toString()}`;
@@ -142,10 +155,8 @@ describe("Vault Engine (Atomic State Machine)", () => {
     const userId = await insertUser(sql, appSchema, "shadow@example.com", "Shadow User");
 
     const result = await vaultUser(sql, userId, TEST_SECRETS, {
-      appSchema,
-      engineSchema,
+      ...buildVaultOptions(appSchema, engineSchema, new Date("2026-01-10T00:00:00.000Z")),
       shadowMode: true,
-      now: new Date("2026-01-10T00:00:00.000Z"),
     });
 
     expect(result.action).toBe("vaulted");
@@ -166,7 +177,7 @@ describe("Vault Engine (Atomic State Machine)", () => {
     const outboxRows = await sql`
       SELECT *
       FROM ${sql(engineSchema)}.outbox
-      WHERE idempotency_key = ${`vault:${appSchema}:users:${userId}`}
+      WHERE idempotency_key = ${`vault:${appSchema}:users:id:${userId}`}
     `;
 
     expect(publicUser?.email).toBe("shadow@example.com");
@@ -178,7 +189,7 @@ describe("Vault Engine (Atomic State Machine)", () => {
   it("rolls back cleanly when the vault insert collides with an existing hash", async () => {
     const { appSchema, engineSchema } = await prepare({ withDependencies: true });
     const userId = await insertUser(sql, appSchema, "jane.smith@example.com", "Jane Smith");
-    const conflictingHash = await createUserHash(userId, appSchema, TEST_SECRETS.hmacKey);
+    const conflictingHash = await createUserHash(userId, appSchema, "users", TEST_SECRETS.hmacKey);
 
     await sql`
       INSERT INTO ${sql(engineSchema)}.pii_vault (
@@ -211,14 +222,14 @@ describe("Vault Engine (Atomic State Machine)", () => {
       )
     `;
 
-    await expect(vaultUser(sql, userId, TEST_SECRETS, { appSchema, engineSchema })).rejects.toThrow();
+    await expect(vaultUser(sql, userId, TEST_SECRETS, buildVaultOptions(appSchema, engineSchema))).rejects.toThrow();
 
     const [publicUser] = await sql`SELECT email, full_name FROM ${sql(appSchema)}.users WHERE id = ${userId}`;
     const keyRows = await sql`SELECT * FROM ${sql(engineSchema)}.user_keys WHERE user_uuid_hash = ${conflictingHash}`;
     const outboxRows = await sql`
       SELECT *
       FROM ${sql(engineSchema)}.outbox
-      WHERE idempotency_key = ${`vault:${appSchema}:users:${userId}`}
+      WHERE idempotency_key = ${`vault:${appSchema}:users:id:${userId}`}
     `;
 
     expect(publicUser?.email).toBe("jane.smith@example.com");
@@ -231,8 +242,8 @@ describe("Vault Engine (Atomic State Machine)", () => {
     const { appSchema, engineSchema } = await prepare({ withDependencies: true });
     const userId = await insertUser(sql, appSchema, "repeat@example.com", "Repeat User");
 
-    const first = await vaultUser(sql, userId, TEST_SECRETS, { appSchema, engineSchema });
-    const second = await vaultUser(sql, userId, TEST_SECRETS, { appSchema, engineSchema });
+    const first = await vaultUser(sql, userId, TEST_SECRETS, buildVaultOptions(appSchema, engineSchema));
+    const second = await vaultUser(sql, userId, TEST_SECRETS, buildVaultOptions(appSchema, engineSchema));
 
     expect(first.action).toBe("vaulted");
     expect(second.action).toBe("already_vaulted");
@@ -241,7 +252,7 @@ describe("Vault Engine (Atomic State Machine)", () => {
     const outboxRows = await sql`
       SELECT *
       FROM ${sql(engineSchema)}.outbox
-      WHERE idempotency_key = ${`vault:${appSchema}:users:${userId}`}
+      WHERE idempotency_key = ${`vault:${appSchema}:users:id:${userId}`}
     `;
     expect(outboxRows).toHaveLength(1);
   });

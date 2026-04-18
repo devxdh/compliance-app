@@ -1,116 +1,121 @@
 import postgres from "postgres";
 import { assertSchemaIntegrity } from "./bootstrap/integrity";
 import { readWorkerConfig } from "./config/worker";
-import { ComplianceWorker, type ApiClient } from "./worker";
-import { createFetchDispatcher } from "./network/outbox";
 import type { MockMailer } from "./engine/notifier";
+import { createFetchDispatcher } from "./network/outbox";
+import { createControlPlaneApiClient } from "./network/control-plane";
+import { getLogger, logError } from "./observability/logger";
+import { registerProcessGuards } from "./runtime/guards";
+import { ComplianceWorker } from "./worker";
 
-/**
- * Layman Terms:
- * This is the main "Start Button" for the application. It turns the engine on, connects to the database,
- * and starts asking the Central API for jobs. It will run forever until you turn it off.
- *
- * Technical Terms:
- * The entry point for the Compliance Worker daemon. It initializes the PostgreSQL connection pool,
- * loads the validated environment configuration via `readWorkerConfig`, instantiates the `ComplianceWorker`,
- * and begins a continuous asynchronous polling loop with exponential backoff for error handling.
- */
+const logger = getLogger({ component: "bootstrap" });
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 async function main() {
-  console.log("[BOOT] Starting DPDP Compliance Worker...");
+  registerProcessGuards(logger);
+  logger.info("Starting DPDP Compliance Worker");
 
-  // 1. Read and validate environment configuration (Fails fast if keys are missing)
   const config = readWorkerConfig();
 
-  // 2. Initialize the Postgres Connection Pool
-  const sql = postgres(process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/postgres", {
-    max: 10,
-    idle_timeout: 20,
-    connect_timeout: 10,
-  });
-  const sqlReplica = config.replicaDbUrl
-    ? postgres(config.replicaDbUrl, {
+  let sql: postgres.Sql | undefined;
+  let sqlReplica: postgres.Sql | undefined;
+
+  try {
+    sql = postgres(process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/postgres", {
       max: 10,
       idle_timeout: 20,
       connect_timeout: 10,
-    })
-    : undefined;
+    });
 
-  await assertSchemaIntegrity(sql, config.appSchema, process.env.DPDP_WORKER_MANIFEST_PATH);
+    sqlReplica = config.database.replica_db_url
+      ? postgres(config.database.replica_db_url, {
+          max: 10,
+          idle_timeout: 20,
+          connect_timeout: 10,
+        })
+      : undefined;
 
-  // 3. Initialize real HTTP dispatcher for the outbox
-  const pushOutboxEvent = createFetchDispatcher({
-    url: process.env.API_OUTBOX_URL ?? "http://localhost:3000/api/v1/worker/outbox",
-    timeoutMs: 10000
-  });
+    await assertSchemaIntegrity(sql, config.database.app_schema, config.integrity.expected_schema_hash);
 
-  // 4. Initialize the Mailer
-  const mailer: MockMailer = {
-    async sendEmail(to, subject, body) {
-      console.log(`[SMTP_MOCK] Sending email to ${to}: ${subject}`);
-      // Integration Note: In a real deployment, hook this up to Nodemailer, SendGrid, or AWS SES
-    }
-  };
+    const workerClientId = process.env.API_CLIENT_ID ?? "worker-1";
+    const workerBearerToken = process.env.API_WORKER_TOKEN ?? "worker-secret";
+    const workerAuthHeaders = {
+      "x-client-id": workerClientId,
+      authorization: `Bearer ${workerBearerToken}`,
+    } as const;
 
-  // 5. Build the API Client to talk to the Control Plane
-  const apiClient = {
-    async syncTask() {
+    const pushOutboxEvent = createFetchDispatcher({
+      url: process.env.API_OUTBOX_URL ?? "http://localhost:3000/api/v1/worker/outbox",
+      token: workerBearerToken,
+      clientId: workerClientId,
+      timeoutMs: 10_000,
+    });
+
+    const mailer: MockMailer = {
+      async sendEmail(message) {
+        logger.info({ idempotencyKey: message.idempotencyKey }, "SMTP mock accepted notification");
+      },
+    };
+
+    const apiClient = createControlPlaneApiClient({
+      syncUrl: process.env.API_SYNC_URL ?? "http://localhost:3000/api/v1/worker/sync",
+      ackBaseUrl: process.env.API_BASE_URL ?? "http://localhost:3000/api/v1/worker/tasks",
+      workerAuthHeaders,
+      pushOutboxEvent,
+      timeoutMs: 10_000,
+    });
+
+    const worker = new ComplianceWorker({
+      sql,
+      sqlReplica,
+      config,
+      secrets: { kek: config.masterKey, hmacKey: config.hmacKey },
+      apiClient,
+      mailer,
+    });
+
+    logger.info(
+      {
+        appSchema: config.database.app_schema,
+        engineSchema: config.database.engine_schema,
+        replicaEnabled: Boolean(sqlReplica),
+      },
+      "DPDP Compliance Worker booted"
+    );
+
+    while (true) {
       try {
-        const res = await fetch(process.env.API_SYNC_URL ?? "http://localhost:3000/api/v1/worker/sync", {
-          headers: { "x-client-id": "worker-1" }
-        });
-        if (res.status === 200) return await res.json();
-      } catch (e) { /* ignore network drops during polling */ }
-      return { pending: false };
-    },
-    async ackTask(taskId: string, status: string, result: any) {
-      try {
-        const res = await fetch(`${process.env.API_BASE_URL ?? "http://localhost:3000/api/v1/worker/tasks"}/${taskId}/ack`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "x-client-id": "worker-1" },
-          body: JSON.stringify({ status, result })
-        });
-        return res.ok;
-      } catch (e) {
-        return false;
+        const processed = await worker.processNextTask();
+        await worker.flushOutbox();
+
+        if (!processed) {
+          await sleep(5_000);
+        }
+      } catch (error) {
+        const normalized = logError(logger, error, "Worker loop iteration failed");
+        if (normalized.fatal) {
+          throw normalized;
+        }
+
+        await sleep(normalized.retryable ? 5_000 : 10_000);
       }
-    },
-    pushOutboxEvent
-  };
-
-  // 6. Instantiate the core worker
-  const worker = new ComplianceWorker({
-    sql,
-    sqlReplica,
-    config,
-    secrets: { kek: config.masterKey, hmacKey: config.hmacKey },
-    apiClient: apiClient as ApiClient,
-    mailer
-  });
-
-  console.log("[BOOT] DPDP Compliance Worker is running. Polling for tasks...");
-
-  // 7. The Infinite Event Loop
-  while (true) {
-    try {
-      // Attempt to process an incoming command from the Central API
-      const processed = await worker.processNextTask();
-
-      // Flush any pending network webhooks
-      await worker.flushOutbox();
-
-      // If there was no task to process, sleep to prevent CPU spin-locking
-      if (!processed) {
-        await new Promise((res) => setTimeout(res, 5000));
-      }
-    } catch (error) {
-      console.error("[CRITICAL_ERROR] Worker loop crashed. Restarting in 10s...", error);
-      await new Promise((res) => setTimeout(res, 10000));
     }
+  } finally {
+    const shutdownTasks: Promise<unknown>[] = [];
+    if (sql) {
+      shutdownTasks.push(sql.end());
+    }
+    if (sqlReplica) {
+      shutdownTasks.push(sqlReplica.end());
+    }
+    await Promise.allSettled(shutdownTasks);
   }
 }
 
-// Global exception handler
-main().catch(err => {
-  console.error("[FATAL] Worker failed to start:", err);
+main().catch((error) => {
+  logError(logger, error, "Worker failed to start");
   process.exit(1);
 });

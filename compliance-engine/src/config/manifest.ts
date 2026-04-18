@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { fail } from "../errors";
 
 const EXPECTED_SCHEMA_HASH_REGEX = /^\s*expected_schema_hash:\s*"?([0-9a-fA-F]{64})"?\s*$/m;
 
@@ -13,7 +14,14 @@ export async function readWorkerManifest(
   const expectedSchemaHashMatch = manifestText.match(EXPECTED_SCHEMA_HASH_REGEX);
 
   if (!expectedSchemaHashMatch) {
-    throw new Error("compliance.worker.yml must define integrity.expected_schema_hash as a 64-character SHA-256 hex digest.");
+    fail({
+      code: "DPDP_CONFIG_SCHEMA_HASH_MISSING",
+      title: "Missing schema hash",
+      detail: "compliance.worker.yml must define integrity.expected_schema_hash as a 64-character SHA-256 hex digest.",
+      category: "configuration",
+      retryable: false,
+      fatal: true,
+    });
   }
 
   return {

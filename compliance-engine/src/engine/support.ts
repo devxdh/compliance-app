@@ -3,6 +3,7 @@ import { generateHMAC } from "../crypto/hmac";
 import { assertIdentifier, quoteQualifiedIdentifier } from "../db/identifiers";
 import type { WorkerSchemas, WorkerSecrets } from "./contracts";
 import { sha256Hex } from "../utils/digest";
+import { fail } from "../errors";
 
 export const DEFAULT_APP_SCHEMA = "mock_app";
 export const DEFAULT_ENGINE_SCHEMA = "dpdp_engine";
@@ -68,7 +69,13 @@ export function resolveNoticeWindowHours(hours?: number): number {
   }
 
   if (!Number.isInteger(hours) || hours < 1) {
-    throw new Error("noticeWindowHours must be an integer greater than 0.");
+    fail({
+      code: "DPDP_NOTICE_WINDOW_INVALID",
+      title: "Invalid notice window",
+      detail: "noticeWindowHours must be an integer greater than 0.",
+      category: "validation",
+      retryable: false,
+    });
   }
 
   return hours;
@@ -80,7 +87,13 @@ export function resolveRetentionYears(years?: number): number {
   }
 
   if (!Number.isInteger(years) || years < 1) {
-    throw new Error("retentionYears must be an integer greater than 0.");
+    fail({
+      code: "DPDP_RETENTION_YEARS_INVALID",
+      title: "Invalid retention period",
+      detail: "retentionYears must be an integer greater than 0.",
+      category: "validation",
+      retryable: false,
+    });
   }
 
   return years;
@@ -92,7 +105,13 @@ export function resolveGraphMaxDepth(depth?: number): number {
   }
 
   if (!Number.isInteger(depth) || depth < 1) {
-    throw new Error("graphMaxDepth must be an integer greater than 0.");
+    fail({
+      code: "DPDP_GRAPH_MAX_DEPTH_INVALID",
+      title: "Invalid graph max depth",
+      detail: "graphMaxDepth must be an integer greater than 0.",
+      category: "validation",
+      retryable: false,
+    });
   }
 
   return depth;
@@ -100,12 +119,26 @@ export function resolveGraphMaxDepth(depth?: number): number {
 
 export function assertWorkerSecrets(secrets: WorkerSecrets): { kek: Uint8Array; hmacKey: Uint8Array } {
   if (secrets.kek.length !== 32) {
-    throw new Error(`Invalid KEK length. Expected 32 bytes, got ${secrets.kek.length}.`);
+    fail({
+      code: "DPDP_KEK_INVALID_LENGTH",
+      title: "Invalid KEK length",
+      detail: `Invalid KEK length. Expected 32 bytes, got ${secrets.kek.length}.`,
+      category: "configuration",
+      retryable: false,
+      fatal: true,
+    });
   }
 
   const hmacKey = secrets.hmacKey ?? secrets.kek;
   if (hmacKey.length === 0) {
-    throw new Error("HMAC key must not be empty.");
+    fail({
+      code: "DPDP_HMAC_KEY_EMPTY",
+      title: "Invalid HMAC key",
+      detail: "HMAC key must not be empty.",
+      category: "configuration",
+      retryable: false,
+      fatal: true,
+    });
   }
 
   return {
@@ -120,7 +153,13 @@ export function calculateRetentionWindow(now: Date, retentionYears: number, noti
 
   const notificationDueAt = new Date(retentionExpiry.getTime() - noticeWindowHours * 60 * 60 * 1000);
   if (notificationDueAt <= now) {
-    throw new Error("noticeWindowHours is too large for the configured retentionYears.");
+    fail({
+      code: "DPDP_RETENTION_WINDOW_INVALID",
+      title: "Invalid retention window",
+      detail: "noticeWindowHours is too large for the configured retentionYears.",
+      category: "validation",
+      retryable: false,
+    });
   }
 
   return {
@@ -129,8 +168,13 @@ export function calculateRetentionWindow(now: Date, retentionYears: number, noti
   };
 }
 
-export async function createUserHash(userId: number, appSchema: string, hmacKey: Uint8Array): Promise<string> {
-  return generateHMAC(`${appSchema}:users:${userId}`, Buffer.from(hmacKey).toString("base64"));
+export async function createUserHash(
+  rootId: string | number,
+  appSchema: string,
+  rootTable: string,
+  hmacKey: Uint8Array
+): Promise<string> {
+  return generateHMAC(`${appSchema}:${rootTable}:${rootId}`, Buffer.from(hmacKey).toString("base64"));
 }
 
 export async function createPseudonym(userId: number, email: string, salt: string, hmacKey: Uint8Array): Promise<string> {
@@ -139,16 +183,17 @@ export async function createPseudonym(userId: number, email: string, salt: strin
 }
 
 export function buildUserLookupSql(engineSchema: string): string {
-  return `SELECT * FROM ${quoteQualifiedIdentifier(engineSchema, "pii_vault")} WHERE root_schema = $1 AND root_table = 'users' AND root_id = $2`;
+  return `SELECT * FROM ${quoteQualifiedIdentifier(engineSchema, "pii_vault")} WHERE root_schema = $1 AND root_table = $2 AND root_id = $3`;
 }
 
 export async function getVaultRecordByUserId(
   sql: SqlExecutor,
   engineSchema: string,
   appSchema: string,
-  userId: number
+  userId: number,
+  rootTable: string = "users"
 ): Promise<VaultRecord | null> {
-  const rows = await sql.unsafe<VaultRecord[]>(buildUserLookupSql(engineSchema), [appSchema, userId.toString()]);
+  const rows = await sql.unsafe<VaultRecord[]>(buildUserLookupSql(engineSchema), [appSchema, rootTable, userId.toString()]);
   return rows[0] ?? null;
 }
 
@@ -164,7 +209,13 @@ export async function enqueueOutboxEvent(
   const jsonPayload = payload as postgres.JSONValue;
   const serializedPayload = JSON.stringify(jsonPayload);
   if (serializedPayload === undefined) {
-    throw new Error("Outbox payload must be JSON-serializable.");
+    fail({
+      code: "DPDP_OUTBOX_PAYLOAD_INVALID",
+      title: "Invalid outbox payload",
+      detail: "Outbox payload must be JSON-serializable.",
+      category: "validation",
+      retryable: false,
+    });
   }
 
   const [existing] = await sql<OutboxRow[]>`
@@ -247,7 +298,15 @@ export async function enqueueOutboxEvent(
   `;
 
   if (!stored) {
-    throw new Error(`Outbox insert for ${idempotencyKey} completed without returning a row.`);
+    fail({
+      code: "DPDP_OUTBOX_INSERT_INVARIANT_BROKEN",
+      title: "Outbox insert invariant broken",
+      detail: `Outbox insert for ${idempotencyKey} completed without returning a row.`,
+      category: "database",
+      retryable: false,
+      fatal: true,
+      context: { idempotencyKey },
+    });
   }
 
   return stored;

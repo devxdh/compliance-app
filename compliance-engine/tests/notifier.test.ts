@@ -42,6 +42,13 @@ describe("Notification Handshake Engine", () => {
       now: vaultAt,
       retentionYears: 1,
       noticeWindowHours: 48,
+      rootTable: "users",
+      rootIdColumn: "id",
+      rootPiiColumns: {
+        email: "HMAC",
+        full_name: "STATIC_MASK",
+      },
+      satelliteTargets: [],
     });
     return { userId, vaultAt };
   }
@@ -64,9 +71,12 @@ describe("Notification Handshake Engine", () => {
     expect(result.action).toBe("sent");
     expect(mailer.sendEmail).toHaveBeenCalledTimes(1);
     expect(mailer.sendEmail).toHaveBeenCalledWith(
-      "notify.me@example.com",
-      "Notice of Permanent Data Erasure",
-      expect.stringContaining("Dear Notify Me")
+      expect.objectContaining({
+        to: "notify.me@example.com",
+        subject: "Notice of Permanent Data Erasure",
+        body: expect.stringContaining("Dear Notify Me"),
+        idempotencyKey: expect.stringContaining(`notice:${appSchema}:users:${userId}:`),
+      })
     );
 
     const [vaultRow] = await sql`

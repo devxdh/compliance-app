@@ -1,5 +1,6 @@
 import type postgres from "postgres";
 import { assertIdentifier } from "../db/identifiers";
+import { fail } from "../errors";
 
 interface SatelliteRowId {
   id: number;
@@ -8,7 +9,14 @@ interface SatelliteRowId {
 function parseQualifiedTableName(tableName: string) {
   const [schema, table, ...rest] = tableName.split(".");
   if (!schema || !table || rest.length > 0) {
-    throw new Error(`Invalid table name "${tableName}". Expected "schema.table".`);
+    fail({
+      code: "DPDP_SATELLITE_TABLE_INVALID",
+      title: "Invalid satellite table name",
+      detail: `Invalid table name "${tableName}". Expected "schema.table".`,
+      category: "validation",
+      retryable: false,
+      context: { tableName },
+    });
   }
 
   return {
@@ -26,7 +34,13 @@ export async function redactSatelliteTable(
   batchSize: number = 1000
 ): Promise<number> {
   if (!Number.isInteger(batchSize) || batchSize < 1) {
-    throw new Error("batchSize must be an integer greater than 0.");
+    fail({
+      code: "DPDP_SATELLITE_BATCH_SIZE_INVALID",
+      title: "Invalid satellite batch size",
+      detail: "batchSize must be an integer greater than 0.",
+      category: "validation",
+      retryable: false,
+    });
   }
 
   const { schema, table } = parseQualifiedTableName(tableName);

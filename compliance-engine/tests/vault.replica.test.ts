@@ -33,6 +33,10 @@ describe("Vault Engine Replica Routing", () => {
       {
         appSchema: "tenant_app",
         engineSchema: "tenant_engine",
+        rootTable: "users",
+        rootIdColumn: "id",
+        rootPiiColumns: { email: "HMAC", full_name: "STATIC_MASK" },
+        satelliteTargets: [],
         dryRun: true,
         sqlReplica: replica,
         now: new Date("2026-01-10T00:00:00.000Z"),

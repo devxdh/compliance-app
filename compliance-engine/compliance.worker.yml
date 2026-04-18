@@ -1,20 +1,41 @@
 version: "1.0"
-schemas:
-  app: "mock_app"
-  engine: "dpdp_engine"
-retention:
-  years: 5
+database:
+  app_schema: "mock_app"
+  engine_schema: "dpdp_engine"
+
+compliance_policy:
+  retention_years: 5
   notice_window_hours: 48
-crawler:
+
+graph:
+  root_table: "users"
+  root_id_column: "id"
   max_depth: 32
+  root_pii_columns:
+    email: "HMAC"
+    full_name: "STATIC_MASK"
+
+satellite_targets:
+  - table: "marketing_leads"
+    lookup_column: "email"
+    action: "redact"
+    masking_rules:
+      email: "HMAC"
+      name: "STATIC_MASK"
+  - table: "system_audit_logs"
+    lookup_column: "user_identifier"
+    action: "hard_delete"
+
 outbox:
   batch_size: 10
   lease_seconds: 60
   max_attempts: 10
   base_backoff_ms: 1000
+
 security:
   notification_lease_seconds: 120
   master_key_env: "DPDP_MASTER_KEY"
   hmac_key_env: "DPDP_HMAC_KEY"
+
 integrity:
   expected_schema_hash: "0000000000000000000000000000000000000000000000000000000000000000"

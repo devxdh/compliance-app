@@ -1,24 +1,13 @@
-/**
- * MODULE 3.2: THE VAULTING ENGINE (STAGE 1)
- *
- * Expert view:
- * Vaulting is the worker's most critical mutation. It must be atomic, it must
- * be idempotent under retries, and it must never guess its way through a
- * partial dependency graph or invalid configuration.
- *
- * Layman view:
- * This is the moment where the worker takes a user's real details, locks them
- * in the vault, replaces the visible record with a fake stand-in, and writes a
- * "tell the main API later" note in the outbox. If any piece fails, everything
- * rolls back together.
- */
-
 import postgres from "postgres";
+import type { MutationRule, RootPiiColumns, SatelliteTarget } from "../config/worker";
 import { encryptGCM } from "../crypto/aes";
 import { generateDEK, wrapKey } from "../crypto/envelope";
+import { generateHMAC } from "../crypto/hmac";
 import { getDependencyGraph } from "../db/graph";
-import { quoteQualifiedIdentifier } from "../db/identifiers";
+import { assertIdentifier, quoteQualifiedIdentifier } from "../db/identifiers";
+import { fail } from "../errors";
 import type { VaultUserOptions, VaultUserResult, WorkerSecrets } from "./contracts";
+import { redactSatelliteTable } from "./satellite";
 import {
   assertWorkerSecrets,
   calculateRetentionWindow,
@@ -32,59 +21,212 @@ import {
   resolveSchemas,
 } from "./support";
 
+const DEFAULT_SATELLITE_BATCH_SIZE = 1000;
+
+interface RootMutationContext {
+  rootTable: string;
+  rootIdColumn: string;
+  rootPiiColumns: RootPiiColumns;
+  satelliteTargets: SatelliteTarget[];
+}
+
+interface SatelliteMutationResult {
+  table: string;
+  action: "redact" | "hard_delete";
+  affectedRows: number;
+}
+
 function buildVaultDryRunPlan(
   appSchema: string,
   engineSchema: string,
   userId: number,
+  rootContext: RootMutationContext,
   userHash: string,
   dependencyCount: number,
   retentionExpiry: Date,
   notificationDueAt: Date
 ) {
-  const userTable = quoteQualifiedIdentifier(appSchema, "users");
+  const rootTable = quoteQualifiedIdentifier(appSchema, rootContext.rootTable);
   const vaultTable = quoteQualifiedIdentifier(engineSchema, "pii_vault");
   const keyTable = quoteQualifiedIdentifier(engineSchema, "user_keys");
   const outboxTable = quoteQualifiedIdentifier(engineSchema, "outbox");
+  const mutationColumns = Object.keys(rootContext.rootPiiColumns).join(", ");
 
   const action = dependencyCount === 0 ? "hard delete" : "vault";
+  const idempotencyPrefix = dependencyCount === 0 ? "hard-delete" : "vault";
 
   return {
     mode: "dry-run" as const,
-    summary: `Would ${action} user ${userId} in ${appSchema}.users with worker hash ${userHash}.`,
+    summary: `Would ${action} root row ${userId} in ${appSchema}.${rootContext.rootTable} with worker hash ${userHash}.`,
     checks: [
       `Validate ${appSchema} and ${engineSchema} as trusted schema identifiers.`,
-      `Traverse the foreign-key graph rooted at ${userTable}.`,
-      `Lock the target row in ${userTable} before mutating it.`,
+      `Traverse the foreign-key graph rooted at ${rootTable}.`,
+      `Lock the target row in ${rootTable} before mutating it.`,
       "Write the outbox event atomically with the primary data mutation.",
     ],
     cryptoSteps:
       dependencyCount === 0
         ? ["No vaulting cryptography required because the root table has no dependent tables."]
         : [
-          "Generate a one-time 32-byte DEK for the user.",
-          "Encrypt the JSON PII payload with AES-256-GCM.",
-          "Wrap the DEK with the worker KEK using envelope encryption.",
-          "Generate an HMAC-backed pseudonym for the visible user record.",
-        ],
+            "Generate a one-time 32-byte DEK for the root entity.",
+            "Encrypt the configured root PII payload with AES-256-GCM.",
+            "Wrap the DEK with the worker KEK using envelope encryption.",
+            "Mutate configured root PII columns with rule-driven masking/HMAC/nullification.",
+          ],
     sqlSteps:
       dependencyCount === 0
         ? [
-          `BEGIN ISOLATION LEVEL REPEATABLE READ;`,
-          `SELECT id, email, full_name FROM ${userTable} WHERE id = ${userId} FOR UPDATE;`,
-          `DELETE FROM ${userTable} WHERE id = ${userId};`,
-          `INSERT INTO ${outboxTable} (...) VALUES (... 'USER_HARD_DELETED' ...);`,
-          `COMMIT;`,
-        ]
+            `BEGIN ISOLATION LEVEL REPEATABLE READ;`,
+            `SELECT ... FROM ${rootTable} WHERE ${rootContext.rootIdColumn} = ${userId} FOR UPDATE;`,
+            `DELETE FROM ${rootTable} WHERE ${rootContext.rootIdColumn} = ${userId};`,
+            `INSERT INTO ${outboxTable} (...) VALUES (... '${idempotencyPrefix}:${appSchema}:${rootContext.rootTable}:${rootContext.rootIdColumn}:${userId}' ...);`,
+            `COMMIT;`,
+          ]
         : [
-          `BEGIN ISOLATION LEVEL REPEATABLE READ;`,
-          `SELECT id, email, full_name FROM ${userTable} WHERE id = ${userId} FOR UPDATE;`,
-          `INSERT INTO ${vaultTable} (... retention_expiry='${retentionExpiry.toISOString()}', notification_due_at='${notificationDueAt.toISOString()}');`,
-          `INSERT INTO ${keyTable} (...);`,
-          `UPDATE ${userTable} SET email = '<pseudonym>', full_name = '<pseudonymized label>' WHERE id = ${userId};`,
-          `INSERT INTO ${outboxTable} (...) VALUES (... 'USER_VAULTED' ...);`,
-          `COMMIT;`,
-        ],
+            `BEGIN ISOLATION LEVEL REPEATABLE READ;`,
+            `SELECT ... FROM ${rootTable} WHERE ${rootContext.rootIdColumn} = ${userId} FOR UPDATE;`,
+            `INSERT INTO ${vaultTable} (... retention_expiry='${retentionExpiry.toISOString()}', notification_due_at='${notificationDueAt.toISOString()}');`,
+            `INSERT INTO ${keyTable} (...);`,
+            `UPDATE ${rootTable} SET {${mutationColumns}} = <rule-driven values> WHERE ${rootContext.rootIdColumn} = ${userId};`,
+            `INSERT INTO ${outboxTable} (...) VALUES (... '${idempotencyPrefix}:${appSchema}:${rootContext.rootTable}:${rootContext.rootIdColumn}:${userId}' ...);`,
+            `COMMIT;`,
+          ],
   };
+}
+
+function resolveRootContext(options: VaultUserOptions): RootMutationContext {
+  if (!options.rootTable) {
+    fail({
+      code: "DPDP_VAULT_ROOT_TABLE_MISSING",
+      title: "Missing root table configuration",
+      detail: "rootTable is required.",
+      category: "configuration",
+      retryable: false,
+      fatal: true,
+    });
+  }
+
+  if (!options.rootIdColumn) {
+    fail({
+      code: "DPDP_VAULT_ROOT_ID_COLUMN_MISSING",
+      title: "Missing root identifier configuration",
+      detail: "rootIdColumn is required.",
+      category: "configuration",
+      retryable: false,
+      fatal: true,
+    });
+  }
+
+  if (!options.rootPiiColumns || Object.keys(options.rootPiiColumns).length === 0) {
+    fail({
+      code: "DPDP_VAULT_ROOT_PII_COLUMNS_MISSING",
+      title: "Missing root PII column mapping",
+      detail: "rootPiiColumns is required and must contain at least one mutation rule.",
+      category: "configuration",
+      retryable: false,
+      fatal: true,
+    });
+  }
+
+  const rootTable = assertIdentifier(options.rootTable, "graph root table");
+  const rootIdColumn = assertIdentifier(options.rootIdColumn, "graph root id column");
+
+  const rootPiiColumns: RootPiiColumns = {};
+  for (const [column, mutation] of Object.entries(options.rootPiiColumns)) {
+    rootPiiColumns[assertIdentifier(column, "graph root pii column")] = mutation;
+  }
+
+  const satelliteTargets = (options.satelliteTargets ?? []).map((target) => ({
+    ...target,
+    table: assertIdentifier(target.table, "satellite table name"),
+    lookup_column: assertIdentifier(target.lookup_column, "satellite lookup column"),
+  }));
+
+  return {
+    rootTable,
+    rootIdColumn,
+    rootPiiColumns,
+    satelliteTargets,
+  };
+}
+
+function normalizeRootRowValue(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  return String(value);
+}
+
+async function computeMutationValue(
+  mutation: MutationRule,
+  originalValue: unknown,
+  appSchema: string,
+  rootTable: string,
+  column: string,
+  hmacKey: Uint8Array
+): Promise<string | null> {
+  if (mutation === "STATIC_MASK") {
+    return "[REDACTED]";
+  }
+
+  if (mutation === "NULLIFY") {
+    return null;
+  }
+
+  const normalizedValue = normalizeRootRowValue(originalValue);
+  if (normalizedValue === null) {
+    return null;
+  }
+
+  return generateHMAC(
+    `${appSchema}:${rootTable}:${column}:${normalizedValue}`,
+    Buffer.from(hmacKey).toString("base64")
+  );
+}
+
+async function hardDeleteSatelliteRows(
+  tx: postgres.TransactionSql,
+  appSchema: string,
+  tableName: string,
+  lookupColumn: string,
+  lookupValue: string,
+  batchSize: number = DEFAULT_SATELLITE_BATCH_SIZE
+): Promise<number> {
+  if (!Number.isInteger(batchSize) || batchSize < 1) {
+    fail({
+      code: "DPDP_SATELLITE_BATCH_SIZE_INVALID",
+      title: "Invalid satellite batch size",
+      detail: "satellite batchSize must be an integer greater than 0.",
+      category: "validation",
+      retryable: false,
+    });
+  }
+
+  let totalDeleted = 0;
+
+  while (true) {
+    const deletedRows = await tx<{ id: string | number }[]>`
+      WITH batch AS (
+        SELECT id
+        FROM ${tx(appSchema)}.${tx(tableName)}
+        WHERE ${tx(lookupColumn)} = ${lookupValue}
+        LIMIT ${batchSize}
+        FOR UPDATE SKIP LOCKED
+      )
+      DELETE FROM ${tx(appSchema)}.${tx(tableName)}
+      WHERE id IN (SELECT id FROM batch)
+      RETURNING id
+    `;
+
+    if (deletedRows.length === 0) {
+      break;
+    }
+
+    totalDeleted += deletedRows.length;
+  }
+
+  return totalDeleted;
 }
 
 export class ShadowModeRollback extends Error {
@@ -106,14 +248,7 @@ function finalizeVaultResult(result: VaultUserResult, shadowMode: boolean): Vaul
 }
 
 /**
- * Layman Terms:
- * Executes the "Hide the User" operation. It looks at the user, figures out if they have any 
- * connected records (like past orders). If they don't, it just deletes them instantly. If they do, 
- * it encrypts them, creates a fake ID, and updates the database all at once.
- * * Technical Terms:
- * Idempotently vaults or hard-deletes a user based on their relational footprint.
- * Returns a structured result detailing the exact state transition (e.g., `vaulted`, `hard_deleted`, 
- * `already_vaulted`) so orchestrators can handle the outcome symmetrically.
+ * Vaults or hard-deletes a configured root entity under strict transactional guarantees.
  */
 export async function vaultUser(
   sql: postgres.Sql,
@@ -122,24 +257,32 @@ export async function vaultUser(
   options: VaultUserOptions = {}
 ): Promise<VaultUserResult> {
   if (!Number.isInteger(userId) || userId < 1) {
-    throw new Error("userId must be a positive integer.");
+    fail({
+      code: "DPDP_VAULT_USER_ID_INVALID",
+      title: "Invalid root identifier",
+      detail: "userId must be a positive integer.",
+      category: "validation",
+      retryable: false,
+    });
   }
 
   const { appSchema, engineSchema } = resolveSchemas(options);
+  const rootContext = resolveRootContext(options);
   const { kek, hmacKey } = assertWorkerSecrets(secrets);
   const retentionYears = resolveRetentionYears(options.retentionYears);
   const noticeWindowHours = resolveNoticeWindowHours(options.noticeWindowHours);
   const graphMaxDepth = resolveGraphMaxDepth(options.graphMaxDepth);
   const sqlReplica = options.sqlReplica;
   const now = options.now ? new Date(options.now) : new Date();
-  const userHash = await createUserHash(userId, appSchema, hmacKey);
+  const userHash = await createUserHash(userId, appSchema, rootContext.rootTable, hmacKey);
 
-  // --- DRY RUN MODE (Executes Graph calculation outside transaction lock) ---
   if (options.dryRun) {
-    const dependencies = await getDependencyGraph(sqlReplica ?? sql, appSchema, "users", { maxDepth: graphMaxDepth });
+    const dependencies = await getDependencyGraph(sqlReplica ?? sql, appSchema, rootContext.rootTable, {
+      maxDepth: graphMaxDepth,
+    });
     const dependencyCount = dependencies.length;
     const { retentionExpiry, notificationDueAt } = calculateRetentionWindow(now, retentionYears, noticeWindowHours);
-    const existingVault = await getVaultRecordByUserId(sql, engineSchema, appSchema, userId);
+    const existingVault = await getVaultRecordByUserId(sql, engineSchema, appSchema, userId, rootContext.rootTable);
 
     return {
       action: "dry_run",
@@ -150,29 +293,41 @@ export async function vaultUser(
       notificationDueAt: dependencyCount === 0 ? null : notificationDueAt.toISOString(),
       pseudonym: existingVault?.pseudonym ?? null,
       outboxEventType: dependencyCount === 0 ? "USER_HARD_DELETED" : "USER_VAULTED",
-      plan: buildVaultDryRunPlan(appSchema, engineSchema, userId, userHash, dependencyCount, retentionExpiry, notificationDueAt),
+      plan: buildVaultDryRunPlan(
+        appSchema,
+        engineSchema,
+        userId,
+        rootContext,
+        userHash,
+        dependencyCount,
+        retentionExpiry,
+        notificationDueAt
+      ),
     };
   }
 
-  console.log(`--- VAULTING USER #${userId} IN SCHEMA ${appSchema} ---`);
-
-  // Type Issue Fixed: Removed the invalid generic <ArrayBufferLike> constraint
   let dek: Uint8Array = new Uint8Array(0);
   let encryptedPiiBuffer: Uint8Array = new Uint8Array(0);
 
   try {
     try {
       return await sql.begin("isolation level repeatable read", async (tx) => {
-        // 1. LOCK THE ROOT ROW FIRST to establish the snapshot and prevent concurrent mutations
-        const [lockedUser] = await tx<{ id: number; email: string; full_name: string }[]>`
-          SELECT id, email, full_name
-          FROM ${tx(appSchema)}.users
-          WHERE id = ${userId}
+        const columnsToSelect = [
+          rootContext.rootIdColumn,
+          ...new Set([
+            ...Object.keys(rootContext.rootPiiColumns),
+            ...rootContext.satelliteTargets.map((target) => target.lookup_column),
+          ]),
+        ];
+
+        const [lockedRootRow] = await tx<Record<string, unknown>[]>`
+          SELECT ${tx(columnsToSelect)}
+          FROM ${tx(appSchema)}.${tx(rootContext.rootTable)}
+          WHERE ${tx(rootContext.rootIdColumn)} = ${userId}
           FOR UPDATE
         `;
 
-        // 2. Validate Idempotency state within the snapshot
-        const lockedVault = await getVaultRecordByUserId(tx, engineSchema, appSchema, userId);
+        const lockedVault = await getVaultRecordByUserId(tx, engineSchema, appSchema, userId, rootContext.rootTable);
         if (lockedVault) {
           return finalizeVaultResult(
             {
@@ -189,11 +344,11 @@ export async function vaultUser(
           );
         }
 
-        if (!lockedUser) {
+        if (!lockedRootRow) {
           const hardDeleteEvents = await tx<{ id: string }[]>`
             SELECT id
             FROM ${tx(engineSchema)}.outbox
-            WHERE idempotency_key = ${`hard-delete:${appSchema}:users:${userId}`}
+            WHERE idempotency_key = ${`hard-delete:${appSchema}:${rootContext.rootTable}:${rootContext.rootIdColumn}:${userId}`}
             LIMIT 1
           `;
 
@@ -213,24 +368,34 @@ export async function vaultUser(
             );
           }
 
-          throw new Error(`User ${userId} disappeared before vaulting could begin.`);
+          fail({
+            code: "DPDP_VAULT_ROOT_ROW_NOT_FOUND",
+            title: "Root row not found",
+            detail: `Root row ${appSchema}.${rootContext.rootTable}#${userId} disappeared before vaulting began.`,
+            category: "validation",
+            retryable: false,
+          });
         }
 
-        // 3. EXECUTE GRAPH TRAVERSAL INSIDE THE SNAPSHOT to resolve TOCTOU race conditions
-        const dependencies = await getDependencyGraph(tx, appSchema, "users", { maxDepth: graphMaxDepth });
+        const dependencies = await getDependencyGraph(tx, appSchema, rootContext.rootTable, { maxDepth: graphMaxDepth });
         const dependencyCount = dependencies.length;
         const { retentionExpiry, notificationDueAt } = calculateRetentionWindow(now, retentionYears, noticeWindowHours);
 
-        // 4. Branch Logic based on Deterministic Dependency Count
         if (dependencyCount === 0) {
           const deleted = await tx`
-            DELETE FROM ${tx(appSchema)}.users
-            WHERE id = ${userId}
-            RETURNING id
+            DELETE FROM ${tx(appSchema)}.${tx(rootContext.rootTable)}
+            WHERE ${tx(rootContext.rootIdColumn)} = ${userId}
+            RETURNING ${tx(rootContext.rootIdColumn)}
           `;
 
           if (deleted.length === 0) {
-            throw new Error(`User ${userId} could not be deleted from ${appSchema}.users.`);
+            fail({
+              code: "DPDP_VAULT_ROOT_DELETE_FAILED",
+              title: "Root row delete invariant failed",
+              detail: `Root row ${appSchema}.${rootContext.rootTable}#${userId} could not be deleted.`,
+              category: "concurrency",
+              retryable: true,
+            });
           }
 
           await enqueueOutboxEvent(
@@ -240,12 +405,13 @@ export async function vaultUser(
             "USER_HARD_DELETED",
             {
               rootSchema: appSchema,
-              rootTable: "users",
+              rootTable: rootContext.rootTable,
+              rootIdColumn: rootContext.rootIdColumn,
               rootId: userId.toString(),
               deletedAt: now.toISOString(),
               dependencyCount: 0,
             },
-            `hard-delete:${appSchema}:users:${userId}`,
+            `hard-delete:${appSchema}:${rootContext.rootTable}:${rootContext.rootIdColumn}:${userId}`,
             now
           );
 
@@ -264,18 +430,20 @@ export async function vaultUser(
           );
         }
 
-        // 5. Vaulting and Encryption Pipeline
+        const rootPiiPayload: Record<string, unknown> = {};
+        for (const column of Object.keys(rootContext.rootPiiColumns)) {
+          rootPiiPayload[column] = lockedRootRow[column] ?? null;
+        }
+
         const salt = Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(16))).toString("hex");
-        const pseudonym = await createPseudonym(userId, lockedUser.email, salt, hmacKey);
+        const pseudonymSource =
+          normalizeRootRowValue(rootPiiPayload[Object.keys(rootContext.rootPiiColumns)[0] ?? ""]) ??
+          JSON.stringify(rootPiiPayload);
+        const pseudonym = await createPseudonym(userId, pseudonymSource, salt, hmacKey);
 
         dek = generateDEK();
         const wrappedDEK = await wrapKey(dek, kek);
-        const piiToVault = JSON.stringify({
-          email: lockedUser.email,
-          full_name: lockedUser.full_name,
-        });
-
-        encryptedPiiBuffer = await encryptGCM(piiToVault, dek);
+        encryptedPiiBuffer = await encryptGCM(JSON.stringify(rootPiiPayload), dek);
         const encryptedPiiPayload = {
           v: 1,
           data: Buffer.from(encryptedPiiBuffer).toString("base64"),
@@ -299,7 +467,7 @@ export async function vaultUser(
           VALUES (
             ${userHash},
             ${appSchema},
-            'users',
+            ${rootContext.rootTable},
             ${userId.toString()},
             ${pseudonym},
             ${tx.json(encryptedPiiPayload)},
@@ -317,12 +485,68 @@ export async function vaultUser(
           VALUES (${userHash}, ${wrappedDEK}, ${now})
         `;
 
-        await tx`
-          UPDATE ${tx(appSchema)}.users
-          SET email = ${pseudonym},
-              full_name = ${`PSEUDONYMIZED_${userHash.slice(0, 12)}`}
-          WHERE id = ${userId}
-        `;
+        for (const [column, mutation] of Object.entries(rootContext.rootPiiColumns)) {
+          const mutatedValue = await computeMutationValue(
+            mutation,
+            lockedRootRow[column],
+            appSchema,
+            rootContext.rootTable,
+            column,
+            hmacKey
+          );
+
+          await tx`
+            UPDATE ${tx(appSchema)}.${tx(rootContext.rootTable)}
+            SET ${tx(column)} = ${mutatedValue}
+            WHERE ${tx(rootContext.rootIdColumn)} = ${userId}
+          `;
+        }
+
+        const satelliteMutations: SatelliteMutationResult[] = [];
+        for (const target of rootContext.satelliteTargets) {
+          const lookupValue = normalizeRootRowValue(lockedRootRow[target.lookup_column]);
+          if (lookupValue === null) {
+            satelliteMutations.push({
+              table: `${appSchema}.${target.table}`,
+              action: target.action,
+              affectedRows: 0,
+            });
+            continue;
+          }
+
+          if (target.action === "redact") {
+            const newHmacValue = await generateHMAC(
+              `${appSchema}:${target.table}:${target.lookup_column}:${lookupValue}`,
+              Buffer.from(hmacKey).toString("base64")
+            );
+            const affectedRows = await redactSatelliteTable(
+              tx,
+              `${appSchema}.${target.table}`,
+              target.lookup_column,
+              lookupValue,
+              newHmacValue
+            );
+            satelliteMutations.push({
+              table: `${appSchema}.${target.table}`,
+              action: target.action,
+              affectedRows,
+            });
+            continue;
+          }
+
+          const affectedRows = await hardDeleteSatelliteRows(
+            tx,
+            appSchema,
+            target.table,
+            target.lookup_column,
+            lookupValue
+          );
+          satelliteMutations.push({
+            table: `${appSchema}.${target.table}`,
+            action: target.action,
+            affectedRows,
+          });
+        }
 
         await enqueueOutboxEvent(
           tx,
@@ -331,19 +555,19 @@ export async function vaultUser(
           "USER_VAULTED",
           {
             rootSchema: appSchema,
-            rootTable: "users",
+            rootTable: rootContext.rootTable,
+            rootIdColumn: rootContext.rootIdColumn,
             rootId: userId.toString(),
             pseudonym,
             dependencyCount,
             retentionExpiry: retentionExpiry.toISOString(),
             notificationDueAt: notificationDueAt.toISOString(),
             vaultedAt: now.toISOString(),
+            satelliteMutations,
           },
-          `vault:${appSchema}:users:${userId}`,
+          `vault:${appSchema}:${rootContext.rootTable}:${rootContext.rootIdColumn}:${userId}`,
           now
         );
-
-        console.log(`[SUCCESS]: User #${userId} vaulted and pseudonymized.`);
 
         return finalizeVaultResult(
           {
@@ -367,12 +591,7 @@ export async function vaultUser(
       throw error;
     }
   } finally {
-    // Shred the unencrypted arrays from Node process memory immediately upon finish/error
-    if (dek.length > 0) {
-      dek.fill(0);
-    }
-    if (encryptedPiiBuffer.length > 0) {
-      encryptedPiiBuffer.fill(0);
-    }
+    dek.fill(0);
+    encryptedPiiBuffer.fill(0);
   }
 }

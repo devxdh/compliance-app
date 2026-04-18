@@ -15,6 +15,8 @@
 import postgres from "postgres";
 import { assertIdentifier } from "../db/identifiers";
 import type { OutboxRow } from "../engine/support";
+import { asWorkerError, fail, workerError } from "../errors";
+import { getLogger, logError } from "../observability/logger";
 
 export interface OutboxEvent extends OutboxRow {}
 
@@ -37,6 +39,7 @@ export interface ProcessOutboxResult {
 export interface FetchDispatcherOptions {
   url: string;
   token?: string;
+  clientId?: string;
   timeoutMs?: number;
 }
 
@@ -45,6 +48,7 @@ const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_LEASE_SECONDS = 60;
 const DEFAULT_MAX_ATTEMPTS = 10;
 const DEFAULT_BASE_BACKOFF_MS = 1000;
+const logger = getLogger({ component: "outbox" });
 
 function resolvePositiveInteger(value: number | undefined, fallback: number, label: string): number {
   if (value === undefined) {
@@ -52,7 +56,14 @@ function resolvePositiveInteger(value: number | undefined, fallback: number, lab
   }
 
   if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`${label} must be an integer greater than 0.`);
+    fail({
+      code: "DPDP_OUTBOX_OPTION_INVALID",
+      title: "Invalid outbox option",
+      detail: `${label} must be an integer greater than 0.`,
+      category: "validation",
+      retryable: false,
+      context: { label },
+    });
   }
 
   return value;
@@ -63,7 +74,7 @@ function resolvePositiveInteger(value: number | undefined, fallback: number, lab
  * Production code should typically inject `createFetchDispatcher(...)`.
  */
 export async function sendToAPI(event: OutboxEvent): Promise<boolean> {
-  console.log(`[API_SYNC]: Synced event ${event.id} of type ${event.event_type}`);
+  logger.info({ eventId: event.id, eventType: event.event_type }, "Outbox event synced");
   return true;
 }
 
@@ -79,6 +90,7 @@ export function createFetchDispatcher(options: FetchDispatcherOptions) {
         method: "POST",
         headers: {
           "content-type": "application/json",
+          ...(options.clientId ? { "x-client-id": options.clientId } : {}),
           ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
         },
         body: JSON.stringify(event),
@@ -86,7 +98,31 @@ export function createFetchDispatcher(options: FetchDispatcherOptions) {
       });
 
       if (!response.ok) {
-        throw new Error(`Brain API responded with HTTP ${response.status}.`);
+        throw workerError({
+          code:
+            response.status === 401 || response.status === 403
+              ? "DPDP_OUTBOX_AUTH_REJECTED"
+              : response.status === 429 || response.status >= 500
+                ? "DPDP_OUTBOX_DELIVERY_FAILED"
+                : "DPDP_OUTBOX_PROTOCOL_REJECTED",
+          title:
+            response.status === 401 || response.status === 403
+              ? "Control Plane authentication rejected outbox event"
+              : "Control Plane rejected outbox event",
+          detail: `Brain API responded with HTTP ${response.status}.`,
+          category:
+            response.status === 401 || response.status === 403
+              ? "configuration"
+              : response.status === 429 || response.status >= 500
+                ? "network"
+                : "external",
+          retryable: response.status >= 500 || response.status === 429,
+          fatal: response.status < 500 && response.status !== 429,
+          context: {
+            status: response.status,
+            url: options.url,
+          },
+        });
       }
 
       return true;
@@ -167,7 +203,14 @@ async function markOutboxEventProcessed(
   `;
 
   if (updated.length === 0) {
-    throw new Error(`Outbox lease for event ${eventId} was lost before it could be marked processed.`);
+    fail({
+      code: "DPDP_OUTBOX_LEASE_LOST",
+      title: "Outbox lease lost",
+      detail: `Outbox lease for event ${eventId} was lost before it could be marked processed.`,
+      category: "concurrency",
+      retryable: true,
+      context: { eventId },
+    });
   }
 }
 
@@ -202,10 +245,53 @@ async function markOutboxEventFailed(
   `;
 
   if (updated.length === 0) {
-    throw new Error(`Outbox lease for event ${event.id} was lost before it could be retried.`);
+    fail({
+      code: "DPDP_OUTBOX_LEASE_LOST",
+      title: "Outbox lease lost",
+      detail: `Outbox lease for event ${event.id} was lost before it could be retried.`,
+      category: "concurrency",
+      retryable: true,
+      context: { eventId: event.id },
+    });
   }
 
   return deadLetter ? "dead_letter" : "pending";
+}
+
+async function releaseOutboxLease(
+  sql: postgres.Sql,
+  engineSchema: string,
+  eventId: string,
+  leaseToken: string,
+  now: Date,
+  error: unknown
+) {
+  const normalized = asWorkerError(error);
+
+  const updated = await sql`
+    UPDATE ${sql(engineSchema)}.outbox
+    SET status = 'pending',
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        next_attempt_at = ${now},
+        last_error = ${normalized.detail.slice(0, 1024)},
+        updated_at = ${now}
+    WHERE id = ${eventId}
+      AND lease_token = ${leaseToken}
+      AND status = 'leased'
+    RETURNING id
+  `;
+
+  if (updated.length === 0) {
+    fail({
+      code: "DPDP_OUTBOX_LEASE_LOST",
+      title: "Outbox lease lost",
+      detail: `Outbox lease for event ${eventId} was lost before it could be released.`,
+      category: "concurrency",
+      retryable: true,
+      context: { eventId },
+    });
+  }
 }
 
 /**
@@ -246,13 +332,29 @@ export async function processOutbox(
     try {
       const delivered = await syncFn(event);
       if (!delivered) {
-        throw new Error(`Dispatcher returned a falsy delivery result for event ${event.id}.`);
+        throw workerError({
+          code: "DPDP_OUTBOX_DELIVERY_RESULT_INVALID",
+          title: "Outbox dispatcher returned an invalid result",
+          detail: `Dispatcher returned a falsy delivery result for event ${event.id}.`,
+          category: "network",
+          retryable: true,
+          context: { eventId: event.id },
+        });
       }
 
       await markOutboxEventProcessed(sql, engineSchema, event.id, leaseToken, clock());
       result.processed += 1;
     } catch (error) {
-      console.error(`[API_SYNC_ERROR]: Failed to sync event ${event.id}. Error:`, error);
+      const normalized = logError(logger, error, "Failed to sync outbox event", {
+        eventId: event.id,
+        eventType: event.event_type,
+      });
+
+      if (normalized.fatal) {
+        await releaseOutboxLease(sql, engineSchema, event.id, leaseToken, clock(), normalized);
+        throw normalized;
+      }
+
       const failureState = await markOutboxEventFailed(
         sql,
         engineSchema,

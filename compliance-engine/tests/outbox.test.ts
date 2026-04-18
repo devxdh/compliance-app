@@ -4,6 +4,7 @@ import { runMigrations } from "../src/db/migrations";
 import { calculateRetryDelayMs, processOutbox } from "../src/network/outbox";
 import type { OutboxEvent } from "../src/network/outbox";
 import { enqueueOutboxEvent } from "../src/engine/support";
+import { workerError } from "../src/errors";
 import { createTestSql, dropSchemas, uniqueSchema } from "./helpers/db";
 
 describe("Network Outbox Relay", () => {
@@ -263,6 +264,46 @@ describe("Network Outbox Relay", () => {
     expect(row?.status).toBe("dead_letter");
     expect(row?.attempt_count).toBe(1);
     expect(row?.last_error).toContain("Permanent Failure");
+  });
+
+  it("releases the lease and rethrows fatal delivery errors without burning retry attempts", async () => {
+    const { engineSchema } = await prepare();
+    await seedEvent(engineSchema, "event-fatal", "user-fatal", "AUTH_FAIL");
+
+    await expect(
+      processOutbox(
+        sql,
+        async () => {
+          throw workerError({
+            code: "DPDP_OUTBOX_AUTH_REJECTED",
+            title: "Control Plane authentication rejected outbox event",
+            detail: "Brain API responded with HTTP 401.",
+            category: "configuration",
+            retryable: false,
+            fatal: true,
+          });
+        },
+        {
+          engineSchema,
+          batchSize: 10,
+        }
+      )
+    ).rejects.toMatchObject({
+      code: "DPDP_OUTBOX_AUTH_REJECTED",
+      fatal: true,
+    });
+
+    const [row] = await sql`
+      SELECT status, attempt_count, lease_token, lease_expires_at, last_error
+      FROM ${sql(engineSchema)}.outbox
+      WHERE idempotency_key = 'event-fatal'
+    `;
+
+    expect(row?.status).toBe("pending");
+    expect(row?.attempt_count).toBe(0);
+    expect(row?.lease_token).toBeNull();
+    expect(row?.lease_expires_at).toBeNull();
+    expect(row?.last_error).toContain("HTTP 401");
   });
 
   it("handles concurrent workers without duplicating event delivery", async () => {

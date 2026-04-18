@@ -16,6 +16,7 @@
 
 import postgres from "postgres";
 import { assertIdentifier, quoteQualifiedIdentifier } from "./identifiers";
+import { fail } from "../errors";
 
 export interface DependencyNode {
   table_schema: string;
@@ -37,7 +38,13 @@ function resolveMaxDepth(input?: number): number {
   }
 
   if (!Number.isInteger(input) || input < 1) {
-    throw new Error("maxDepth must be an integer greater than 0.");
+    fail({
+      code: "DPDP_GRAPH_MAX_DEPTH_INVALID",
+      title: "Invalid graph max depth",
+      detail: "maxDepth must be an integer greater than 0.",
+      category: "validation",
+      retryable: false,
+    });
   }
 
   return input;
@@ -70,7 +77,14 @@ export async function getDependencyGraph(
   `;
 
   if (!rootExists?.oid) {
-    throw new Error(`Root table ${safeSchema}.${safeRootTable} does not exist.`);
+    fail({
+      code: "DPDP_GRAPH_ROOT_TABLE_MISSING",
+      title: "Root table not found",
+      detail: `Root table ${safeSchema}.${safeRootTable} does not exist.`,
+      category: "validation",
+      retryable: false,
+      context: { schema: safeSchema, rootTable: safeRootTable },
+    });
   }
 
   const result = await sql<
@@ -132,9 +146,15 @@ export async function getDependencyGraph(
   `;
 
   if (result.some((row) => row.depth >= maxDepth || row.reached_limit)) {
-    throw new Error(
-      `Dependency graph for ${safeSchema}.${safeRootTable} reached the safety limit of ${maxDepth}. Increase maxDepth before running destructive operations.`
-    );
+    fail({
+      code: "DPDP_GRAPH_DEPTH_LIMIT_REACHED",
+      title: "Dependency graph depth limit reached",
+      detail: `Dependency graph for ${safeSchema}.${safeRootTable} reached the safety limit of ${maxDepth}. Increase maxDepth before running destructive operations.`,
+      category: "integrity",
+      retryable: false,
+      fatal: true,
+      context: { schema: safeSchema, rootTable: safeRootTable, maxDepth },
+    });
   }
 
   return result.map(({ table_oid: _tableOid, reached_limit: _reachedLimit, ...node }) => node);

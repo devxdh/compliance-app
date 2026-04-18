@@ -13,6 +13,8 @@
  * It appends a 16-byte Auth Tag to the ciphertext to instantly fail decryption if tampered with.
  */
 
+import { fail } from "../errors";
+
 const IV_LENGTH = 12; // 96-bit IV is the industry standard for GCM.
 const KEY_LENGTH = 32; // 256-bit key for AES-256.
 
@@ -22,7 +24,13 @@ const KEY_LENGTH = 32; // 256-bit key for AES-256.
  */
 export async function encryptGCM(plaintext: string, rawKey: Uint8Array): Promise<Uint8Array> {
   if (rawKey.length !== KEY_LENGTH) {
-    throw new Error(`Invalid key length. Expected ${KEY_LENGTH} bytes for AES-256, got ${rawKey.length} bytes.`);
+    fail({
+      code: "DPDP_CRYPTO_INVALID_KEY_LENGTH",
+      title: "Invalid AES key length",
+      detail: `Invalid key length. Expected ${KEY_LENGTH} bytes for AES-256, got ${rawKey.length} bytes.`,
+      category: "crypto",
+      retryable: false,
+    });
   }
 
   const crypto = globalThis.crypto;
@@ -62,11 +70,23 @@ export async function encryptGCM(plaintext: string, rawKey: Uint8Array): Promise
  */
 export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Promise<string> {
   if (rawKey.length !== KEY_LENGTH) {
-    throw new Error(`Invalid key length. Expected ${KEY_LENGTH} bytes for AES-256, got ${rawKey.length} bytes.`);
+    fail({
+      code: "DPDP_CRYPTO_INVALID_KEY_LENGTH",
+      title: "Invalid AES key length",
+      detail: `Invalid key length. Expected ${KEY_LENGTH} bytes for AES-256, got ${rawKey.length} bytes.`,
+      category: "crypto",
+      retryable: false,
+    });
   }
 
   if (combined.length < IV_LENGTH + 16) { // IV + Auth Tag (16 bytes)
-    throw new Error("Invalid ciphertext. Too short to be a valid AES-GCM payload.");
+    fail({
+      code: "DPDP_CRYPTO_INVALID_CIPHERTEXT",
+      title: "Invalid ciphertext",
+      detail: "Invalid ciphertext. Too short to be a valid AES-GCM payload.",
+      category: "crypto",
+      retryable: false,
+    });
   }
 
   const crypto = globalThis.crypto;
@@ -85,11 +105,23 @@ export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Prom
   );
 
   // 3. Decrypt. If the data was tampered with, this will throw an error automatically.
-  const decryptedBuffer = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv },
-    key,
-    ciphertext
-  );
+  let decryptedBuffer: ArrayBuffer;
+  try {
+    decryptedBuffer = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      key,
+      ciphertext
+    );
+  } catch (error) {
+    fail({
+      code: "DPDP_CRYPTO_INTEGRITY_FAILURE",
+      title: "AES-GCM integrity verification failed",
+      detail: "Decryption failed because the ciphertext or auth tag was corrupted.",
+      category: "crypto",
+      retryable: false,
+      cause: error,
+    });
+  }
 
   return new TextDecoder().decode(decryptedBuffer);
 }

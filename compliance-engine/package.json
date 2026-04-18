@@ -9,12 +9,16 @@
   },
   "devDependencies": {
     "@types/bun": "catalog:",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "^4.1.4"
   },
   "dependencies": {
     "javascript-obfuscator": "^5.4.1",
-    "postgres": "^3.4.9"
+    "js-yaml": "^4.1.0",
+    "pino": "^10.3.1",
+    "postgres": "^3.4.9",
+    "zod": "^4.1.12"
   }
 }

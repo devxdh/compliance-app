@@ -1,8 +1,17 @@
+import { fail } from "../errors";
+
 const IDENTIFIER_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
 export function assertIdentifier(name: string, label: string): string {
   if (!IDENTIFIER_PATTERN.test(name)) {
-    throw new Error(`Invalid ${label}: "${name}". Only letters, numbers, and underscores are allowed.`);
+    fail({
+      code: "DPDP_IDENTIFIER_INVALID",
+      title: "Invalid identifier",
+      detail: `Invalid ${label}: "${name}". Only letters, numbers, and underscores are allowed.`,
+      category: "validation",
+      retryable: false,
+      context: { label },
+    });
   }
 
   return name;

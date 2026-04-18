@@ -23,6 +23,7 @@ describe("Fetch Dispatcher Integration", () => {
     const dispatcher = createFetchDispatcher({
       url: apiUrl,
       token: "secret-token",
+      clientId: "worker-tenant-1",
     });
 
     const success = await dispatcher({
@@ -52,6 +53,7 @@ describe("Fetch Dispatcher Integration", () => {
     expect(callArgs![0]).toBe(apiUrl);
     expect(callArgs![1].headers).toEqual({
       "content-type": "application/json",
+      "x-client-id": "worker-tenant-1",
       authorization: "Bearer secret-token",
     });
     expect(JSON.parse(callArgs![1].body)).toMatchObject({
@@ -61,7 +63,7 @@ describe("Fetch Dispatcher Integration", () => {
     });
   });
 
-  it("throws an error if the server responds with a non-2xx status", async () => {
+  it("classifies 500 responses as retryable transport failures", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 500,
@@ -73,23 +75,67 @@ describe("Fetch Dispatcher Integration", () => {
       url: apiUrl,
     });
 
-    await expect(dispatcher({
-      id: "evt-123",
-      idempotency_key: "ik-123",
-      user_uuid_hash: "hash-456",
-      event_type: "USER_VAULTED",
-      payload: {},
-      previous_hash: "GENESIS",
-      current_hash: "abcd",
-      status: "pending",
-      attempt_count: 0,
-      lease_token: null,
-      lease_expires_at: null,
-      next_attempt_at: new Date(),
-      processed_at: null,
-      last_error: null,
-      created_at: new Date(),
-      updated_at: new Date()
-    })).rejects.toThrow("Brain API responded with HTTP 500");
+    await expect(
+      dispatcher({
+        id: "evt-123",
+        idempotency_key: "ik-123",
+        user_uuid_hash: "hash-456",
+        event_type: "USER_VAULTED",
+        payload: {},
+        previous_hash: "GENESIS",
+        current_hash: "abcd",
+        status: "pending",
+        attempt_count: 0,
+        lease_token: null,
+        lease_expires_at: null,
+        next_attempt_at: new Date(),
+        processed_at: null,
+        last_error: null,
+        created_at: new Date(),
+        updated_at: new Date(),
+      })
+    ).rejects.toMatchObject({
+      code: "DPDP_OUTBOX_DELIVERY_FAILED",
+      retryable: true,
+      fatal: false,
+    });
+  });
+
+  it("classifies 401 responses as fatal configuration failures", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+    });
+
+    vi.stubGlobal("fetch", mockFetch);
+
+    const dispatcher = createFetchDispatcher({
+      url: apiUrl,
+    });
+
+    await expect(
+      dispatcher({
+        id: "evt-401",
+        idempotency_key: "ik-401",
+        user_uuid_hash: "hash-401",
+        event_type: "USER_VAULTED",
+        payload: {},
+        previous_hash: "GENESIS",
+        current_hash: "abcd",
+        status: "pending",
+        attempt_count: 0,
+        lease_token: null,
+        lease_expires_at: null,
+        next_attempt_at: new Date(),
+        processed_at: null,
+        last_error: null,
+        created_at: new Date(),
+        updated_at: new Date(),
+      })
+    ).rejects.toMatchObject({
+      code: "DPDP_OUTBOX_AUTH_REJECTED",
+      retryable: false,
+      fatal: true,
+    });
   });
 });

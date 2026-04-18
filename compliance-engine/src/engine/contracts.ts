@@ -1,4 +1,5 @@
 import type postgres from "postgres";
+import type { RootPiiColumns, SatelliteTarget } from "../config/worker";
 
 export interface WorkerSecrets {
   kek: Uint8Array;
@@ -27,15 +28,21 @@ export interface DryRunPlan {
 }
 
 export interface VaultUserOptions extends WorkerSchemas, WorkerTimingOptions {
+  rootTable?: string;
+  rootIdColumn?: string;
+  rootPiiColumns?: RootPiiColumns;
+  satelliteTargets?: SatelliteTarget[];
   shadowMode?: boolean;
   sqlReplica?: postgres.Sql;
 }
 
 export interface DispatchNoticeOptions extends WorkerSchemas, WorkerTimingOptions {
+  rootTable?: string;
   notificationLeaseSeconds?: number;
 }
 
 export interface ShredUserOptions extends WorkerSchemas, WorkerTimingOptions {
+  rootTable?: string;
   requireNotification?: boolean;
 }
 

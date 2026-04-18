@@ -41,6 +41,13 @@ describe("Crypto-Shredder Engine", () => {
       now: new Date("2020-01-01T00:00:00.000Z"),
       retentionYears: 1,
       noticeWindowHours: 48,
+      rootTable: "users",
+      rootIdColumn: "id",
+      rootPiiColumns: {
+        email: "HMAC",
+        full_name: "STATIC_MASK",
+      },
+      satelliteTargets: [],
     });
     return userId;
   }

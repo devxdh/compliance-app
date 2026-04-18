@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { writeFile } from "node:fs/promises";
 import postgres from "postgres";
 import { assertSchemaIntegrity } from "../src/bootstrap/integrity";
 import { detectSchemaDrift } from "../src/db/drift";
@@ -57,29 +56,9 @@ describe("Schema Drift Detection", () => {
 
   it("fails closed when the manifest hash does not match the live schema digest", async () => {
     const schema = await createSchema();
-    const manifestPath = `/tmp/${uniqueSchema("manifest")}.yml`;
     const liveHash = await detectSchemaDrift(sql, schema);
 
-    await writeFile(
-      manifestPath,
-      [
-        'version: "1.0"',
-        "integrity:",
-        `  expected_schema_hash: "${liveHash}"`,
-      ].join("\n")
-    );
-
-    await expect(assertSchemaIntegrity(sql, schema, manifestPath)).resolves.toBe(liveHash);
-
-    await writeFile(
-      manifestPath,
-      [
-        'version: "1.0"',
-        "integrity:",
-        `  expected_schema_hash: "${"0".repeat(64)}"`,
-      ].join("\n")
-    );
-
-    await expect(assertSchemaIntegrity(sql, schema, manifestPath)).rejects.toThrow(/schema drift detected/i);
+    await expect(assertSchemaIntegrity(sql, schema, liveHash)).resolves.toBe(liveHash);
+    await expect(assertSchemaIntegrity(sql, schema, "0".repeat(64))).rejects.toThrow(/schema drift detected/i);
   });
 });

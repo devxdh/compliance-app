@@ -1,32 +1,24 @@
-/**
- * MODULE 6: THE CRYPTO-SHREDDING ENGINE (STAGE 4)
- *
- * Expert view:
- * Shredding must be the last irreversible step. We therefore verify timing and
- * notice preconditions first, then delete the DEK and replace the ciphertext
- * with a non-PII sentinel in the same transaction.
- *
- * Layman view:
- * This is the final kill switch. Once the worker reaches this step, it destroys
- * the only key that can open the vault and overwrites the vault payload with a
- * harmless marker saying the data is gone.
- */
-
 import postgres from "postgres";
+import { fail } from "../errors";
+import { getLogger } from "../observability/logger";
 import type { ShredUserOptions, ShredUserResult } from "./contracts";
-import {
-  DESTROYED_PII_SENTINEL,
-  enqueueOutboxEvent,
-  getVaultRecordByUserId,
-  resolveSchemas,
-} from "./support";
+import { DESTROYED_PII_SENTINEL, enqueueOutboxEvent, getVaultRecordByUserId, resolveSchemas } from "./support";
 
-function buildShredDryRunPlan(appSchema: string, engineSchema: string, userId: number, userHash: string, retentionExpiry: Date) {
+const logger = getLogger({ component: "shredder" });
+
+function buildShredDryRunPlan(
+  appSchema: string,
+  engineSchema: string,
+  rootTable: string,
+  userId: number,
+  userHash: string,
+  retentionExpiry: Date
+) {
   return {
     mode: "dry-run" as const,
-    summary: `Would crypto-shred user ${userId} (${userHash}) after verifying retention expiry ${retentionExpiry.toISOString()}.`,
+    summary: `Would crypto-shred root row ${userId} (${userHash}) in ${appSchema}.${rootTable} after ${retentionExpiry.toISOString()}.`,
     checks: [
-      `Read ${engineSchema}.pii_vault using (${appSchema}, users, ${userId}) as the lookup key.`,
+      `Read ${engineSchema}.pii_vault using (${appSchema}, ${rootTable}, ${userId}) as the lookup key.`,
       "Confirm that retention_expiry has passed.",
       "Require a completed notification unless explicitly disabled.",
       "Delete the DEK and replace the vault payload in one transaction.",
@@ -36,25 +28,18 @@ function buildShredDryRunPlan(appSchema: string, engineSchema: string, userId: n
       "Leave only non-PII metadata and a destroyed sentinel in the vault row.",
     ],
     sqlSteps: [
-      `BEGIN ISOLATION LEVEL REPEATABLE READ;`,
-      `SELECT * FROM ${engineSchema}.pii_vault WHERE root_schema = '${appSchema}' AND root_table = 'users' AND root_id = '${userId}' FOR UPDATE;`,
+      "BEGIN ISOLATION LEVEL REPEATABLE READ;",
+      `SELECT * FROM ${engineSchema}.pii_vault WHERE root_schema = '${appSchema}' AND root_table = '${rootTable}' AND root_id = '${userId}' FOR UPDATE;`,
       `DELETE FROM ${engineSchema}.user_keys WHERE user_uuid_hash = '<user-hash>';`,
       `UPDATE ${engineSchema}.pii_vault SET encrypted_pii = '{"destroyed":true}', shredded_at = '<timestamp>';`,
       `INSERT INTO ${engineSchema}.outbox (...) VALUES (... 'SHRED_SUCCESS' ...);`,
-      `COMMIT;`,
+      "COMMIT;",
     ],
   };
 }
 
 /**
- * Layman Terms:
- * Triggers the "Kill Switch" for a user. It throws away their DEK, rendering the vault forever 
- * un-openable, and leaves a "destroyed" sticker on the vault so we know it's gone.
- * 
- * Technical Terms:
- * Stage 4 Crypto-Shredding. Locks the vault row, asserts retention expiry, deletes the DEK, 
- * updates the `pii_vault` with a `{ destroyed: true }` marker, and queues a `SHRED_SUCCESS` 
- * event to notify the Central API, all inside a `REPEATABLE READ` transaction.
+ * Destroys the DEK and replaces vaulted ciphertext with a non-PII sentinel.
  */
 export async function shredUser(
   sql: postgres.Sql,
@@ -62,16 +47,29 @@ export async function shredUser(
   options: ShredUserOptions = {}
 ): Promise<ShredUserResult> {
   if (!Number.isInteger(userId) || userId < 1) {
-    throw new Error("userId must be a positive integer.");
+    fail({
+      code: "DPDP_SHREDDER_USER_ID_INVALID",
+      title: "Invalid root identifier",
+      detail: "userId must be a positive integer.",
+      category: "validation",
+      retryable: false,
+    });
   }
 
   const { appSchema, engineSchema } = resolveSchemas(options);
+  const rootTable = options.rootTable ?? "users";
   const now = options.now ? new Date(options.now) : new Date();
   const requireNotification = options.requireNotification ?? true;
 
-  const vault = await getVaultRecordByUserId(sql, engineSchema, appSchema, userId);
+  const vault = await getVaultRecordByUserId(sql, engineSchema, appSchema, userId, rootTable);
   if (!vault) {
-    throw new Error(`Vault record not found for ${appSchema}.users#${userId}.`);
+    fail({
+      code: "DPDP_SHREDDER_VAULT_NOT_FOUND",
+      title: "Vault record not found",
+      detail: `Vault record not found for ${appSchema}.${rootTable}#${userId}.`,
+      category: "validation",
+      retryable: false,
+    });
   }
 
   if (options.dryRun) {
@@ -81,24 +79,35 @@ export async function shredUser(
       dryRun: true,
       shreddedAt: vault.shredded_at ? vault.shredded_at.toISOString() : null,
       outboxEventType: "SHRED_SUCCESS",
-      plan: buildShredDryRunPlan(appSchema, engineSchema, userId, vault.user_uuid_hash, new Date(vault.retention_expiry)),
+      plan: buildShredDryRunPlan(
+        appSchema,
+        engineSchema,
+        rootTable,
+        userId,
+        vault.user_uuid_hash,
+        new Date(vault.retention_expiry)
+      ),
     };
   }
-
-  console.log(`--- EXECUTING CRYPTO-SHREDDING FOR USER #${userId} ---`);
 
   return sql.begin("isolation level repeatable read", async (tx) => {
     const [lockedVault] = await tx`
       SELECT *
       FROM ${tx(engineSchema)}.pii_vault
       WHERE root_schema = ${appSchema}
-        AND root_table = 'users'
+        AND root_table = ${rootTable}
         AND root_id = ${userId.toString()}
       FOR UPDATE
     `;
 
     if (!lockedVault) {
-      throw new Error(`Vault record vanished while shredding user ${userId}.`);
+      fail({
+        code: "DPDP_SHREDDER_VAULT_LOST",
+        title: "Vault record vanished during shredding",
+        detail: `Vault record for ${appSchema}.${rootTable}#${userId} disappeared during shredding.`,
+        category: "concurrency",
+        retryable: true,
+      });
     }
 
     if (lockedVault.shredded_at) {
@@ -112,13 +121,23 @@ export async function shredUser(
     }
 
     if (new Date(lockedVault.retention_expiry) > now) {
-      throw new Error(
-        `Cannot shred user ${userId} before retention expiry (${new Date(lockedVault.retention_expiry).toISOString()}).`
-      );
+      fail({
+        code: "DPDP_SHREDDER_RETENTION_NOT_REACHED",
+        title: "Retention window still active",
+        detail: `Cannot shred root row ${userId} before retention expiry (${new Date(lockedVault.retention_expiry).toISOString()}).`,
+        category: "validation",
+        retryable: false,
+      });
     }
 
     if (requireNotification && !lockedVault.notification_sent_at) {
-      throw new Error(`Cannot shred user ${userId} before the pre-erasure notice has been sent.`);
+      fail({
+        code: "DPDP_SHREDDER_NOTICE_MISSING",
+        title: "Pre-erasure notice missing",
+        detail: `Cannot shred root row ${userId} before the pre-erasure notice has been sent.`,
+        category: "validation",
+        retryable: false,
+      });
     }
 
     const deletedKeys = await tx`
@@ -128,7 +147,14 @@ export async function shredUser(
     `;
 
     if (deletedKeys.length === 0) {
-      throw new Error(`Cannot shred user ${userId}: no active key exists for hash ${lockedVault.user_uuid_hash}.`);
+      fail({
+        code: "DPDP_SHREDDER_KEY_MISSING",
+        title: "Key ring record missing",
+        detail: `Cannot shred root row ${userId}: no active key exists for hash ${lockedVault.user_uuid_hash}.`,
+        category: "integrity",
+        retryable: false,
+        fatal: true,
+      });
     }
 
     await tx`
@@ -146,15 +172,22 @@ export async function shredUser(
       "SHRED_SUCCESS",
       {
         rootSchema: appSchema,
-        rootTable: "users",
+        rootTable,
         rootId: userId.toString(),
         shreddedAt: now.toISOString(),
       },
-      `shred:${appSchema}:users:${userId}`,
+      `shred:${appSchema}:${rootTable}:${userId}`,
       now
     );
 
-    console.log(`[SUCCESS]: User #${userId} mathematically anonymized.`);
+    logger.info(
+      {
+        userHash: lockedVault.user_uuid_hash,
+        rootTable,
+        rootId: userId,
+      },
+      "Root row crypto-shredded"
+    );
 
     return {
       action: "shredded",
