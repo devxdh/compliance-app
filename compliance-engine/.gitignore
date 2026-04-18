@@ -5,3 +5,5 @@ coverage
 dist
 *.tsbuildinfo
 .DS_Store
+.codex
+.env

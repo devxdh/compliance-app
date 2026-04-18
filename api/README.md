@@ -1,46 +1,53 @@
-# Compliance API
+# DPDP Control Plane API
 
-This package is the control-plane scaffold for the broader compliance platform.
+Control-plane bootstrap for the DPDP Compliance Engine, built for Bun with:
 
-Its current purpose is to give the monorepo a stable home for the future central API described in the worker docs:
+- `hono`
+- `zod`
+- `@hono/zod-validator`
+- `postgres.js`
+- Web Crypto (`globalThis.crypto`) for Ed25519 Certificate of Erasure signatures
 
-- job orchestration,
-- worker sync endpoints,
-- metadata coordination,
-- and certificate generation.
-
-For now it exposes a minimal Bun server so the package can be developed and typechecked inside the workspace without inventing the full API contract prematurely.
-
-## Current Structure
-
-- `src/modules/worker`
-  Worker-facing control-plane module with controller/service/repository layering.
-- `src/types`
-  Shared API domain and JSON types used across multiple modules.
-- `src/db`
-  Postgres client and schema bootstrap/migrations for task queue + outbox.
-- `tests/unit`
-  Fast, isolated tests (no external dependencies).
-- `tests/integration`
-  Endpoint + DB tests for production-like behavior.
-
-## Test Strategy
-
-### Layman terms
-
-- Unit tests check internal behavior quickly.
-- Integration tests prove routes + database behavior actually works together.
-
-### Technical terms
-
-- `test:unit`: no network/database requirements; deterministic service/app checks.
-- `test:integration`: exercises HTTP endpoints and SQL side effects.
-- `test:all`: runs both suites in order.
+## Runtime
 
 ```bash
-bun run test:unit
-bun run test:integration
-bun run test:all
+bun install
+bun run api:typecheck
+bun run api:test
+bun run api:dev
 ```
 
-Integration tests require a reachable PostgreSQL instance (same requirement as before).
+## Environment
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `DATABASE_URL` | PostgreSQL DSN | `postgres://postgres:postgres@localhost:5432/postgres` |
+| `API_CONTROL_SCHEMA` | API schema name | `dpdp_control` |
+| `PORT` | HTTP port | `3000` |
+| `WORKER_TASK_LEASE_SECONDS` | Task lease duration | `60` |
+| `COE_KEY_ID` | CoE signing key identifier | `control-plane-ed25519-v1` |
+| `COE_PRIVATE_KEY_PKCS8_BASE64` | Optional Ed25519 private key | _unset_ |
+| `COE_PUBLIC_KEY_SPKI_BASE64` | Required when private key is set | _unset_ |
+
+If no keypair env vars are provided, the API generates an in-memory Ed25519 keypair at boot.
+
+## API Surface
+
+- `POST /api/v1/erasure-requests`
+  - Creates control-plane request and enqueues initial `VAULT_USER` worker task.
+- `GET /api/v1/worker/sync`
+  - Leases the next worker task (`FOR UPDATE SKIP LOCKED`).
+- `POST /api/v1/worker/tasks/:taskId/ack`
+  - Persists worker task completion/failure.
+- `POST /api/v1/worker/outbox`
+  - Ingests worker metadata events (`USER_VAULTED`, `NOTIFICATION_SENT`, `SHRED_SUCCESS`).
+  - Mints signed CoE on `SHRED_SUCCESS`.
+- `GET /api/v1/certificates/:requestId`
+  - Returns the signed certificate payload + signature.
+
+## Testing
+
+- Unit tests: Ed25519 CoE signing/verification (`api/tests/unit`).
+- Integration tests: API + PostgreSQL state-machine flow (`api/tests/integration`).
+
+Integration tests require a reachable PostgreSQL at `TEST_DATABASE_URL` (or default localhost DSN).

@@ -1,31 +1,23 @@
 {
-  "name": "compliance-api",
+  "name": "api",
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "bun --watch src/server.ts",
-    "start": "bun src/server.ts",
-    "test": "bun run test:unit",
-    "test:all": "bun run test:unit && bun run test:integration",
-    "test:unit": "vitest run tests/unit",
-    "test:integration": "vitest run tests/integration",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "dev": "bun run --hot src/index.ts",
+    "start": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --fileParallelism=false"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "^0.7.5",
+    "hono": "^4.12.14",
+    "postgres": "^3.4.9",
+    "zod": "^4.1.12"
   },
   "devDependencies": {
     "@types/bun": "catalog:",
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
     "@types/node": "catalog:",
-    "@types/supertest": "^7.2.0",
-    "supertest": "^7.2.2",
     "typescript": "catalog:",
     "vitest": "^4.1.4"
-  },
-  "dependencies": {
-    "cors": "^2.8.6",
-    "express": "^5.2.1",
-    "postgres": "^3.4.9",
-    "zod": "^4.3.6"
   }
 }
