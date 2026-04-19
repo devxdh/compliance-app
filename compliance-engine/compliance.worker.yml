@@ -21,6 +21,8 @@ graph:
   root_table: "users"
   root_id_column: "id"
   max_depth: 32
+  notice_email_column: "email"
+  notice_name_column: "full_name"
   root_pii_columns:
     email: "HMAC"
     full_name: "STATIC_MASK"

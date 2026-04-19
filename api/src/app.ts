@@ -19,6 +19,7 @@ export interface CreateAppOptions {
   workerClientName?: string;
   maxOutboxPayloadBytes?: number;
   taskLeaseSeconds?: number;
+  webhookTimeoutMs?: number;
 }
 
 const logger = getLogger({ component: "http" });
@@ -73,6 +74,7 @@ export function createApp(options: CreateAppOptions) {
     workerSharedSecret: options.workerSharedSecret,
     workerClientName: options.workerClientName ?? "worker-1",
     maxOutboxPayloadBytes: options.maxOutboxPayloadBytes ?? 32_768,
+    webhookTimeoutMs: options.webhookTimeoutMs,
   });
 
   app.use("*", requestContextMiddleware);

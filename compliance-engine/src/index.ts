@@ -1,6 +1,7 @@
 import postgres from "postgres";
 import { assertSchemaIntegrity } from "./bootstrap/integrity";
 import { readWorkerConfig } from "./config/worker";
+import { workerError } from "./errors";
 import type { MockMailer } from "./engine/notifier";
 import { createFetchDispatcher } from "./network/outbox";
 import { createControlPlaneApiClient } from "./network/control-plane";
@@ -9,6 +10,29 @@ import { registerProcessGuards } from "./runtime/guards";
 import { ComplianceWorker } from "./worker";
 
 const logger = getLogger({ component: "bootstrap" });
+let deadLettersTotal = 0;
+
+async function readOutboxQueueDepth(sql: postgres.Sql, engineSchema: string): Promise<number> {
+  const [row] = await sql<{ total: number }[]>`
+    SELECT COUNT(*)::int AS total
+    FROM ${sql(engineSchema)}.outbox
+    WHERE status IN ('pending', 'leased')
+  `;
+
+  return row?.total ?? 0;
+}
+
+function createMetricsPayload(queueDepth: number): string {
+  return [
+    "# HELP dpdp_outbox_queue_depth Number of relay-pending outbox rows.",
+    "# TYPE dpdp_outbox_queue_depth gauge",
+    `dpdp_outbox_queue_depth ${queueDepth}`,
+    "# HELP dpdp_dead_letters_total Total outbox events moved to dead_letter.",
+    "# TYPE dpdp_dead_letters_total counter",
+    `dpdp_dead_letters_total ${deadLettersTotal}`,
+    "",
+  ].join("\n");
+}
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -54,9 +78,38 @@ async function main() {
       timeoutMs: 10_000,
     });
 
+    const mailerWebhookUrl = process.env.MAILER_WEBHOOK_URL;
+    if (!mailerWebhookUrl) {
+      throw workerError({
+        code: "DPDP_MAILER_TRANSPORT_MISSING",
+        title: "Missing mailer transport",
+        detail: "MAILER_WEBHOOK_URL must be configured for production notice dispatch.",
+        category: "configuration",
+        retryable: false,
+        fatal: true,
+      });
+    }
+
     const mailer: MockMailer = {
       async sendEmail(message) {
-        logger.info({ idempotencyKey: message.idempotencyKey }, "SMTP mock accepted notification");
+        const response = await fetch(mailerWebhookUrl, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(message),
+        });
+
+        if (!response.ok) {
+          throw workerError({
+            code: "DPDP_MAILER_TRANSPORT_FAILED",
+            title: "Mailer transport failed",
+            detail: `MAILER_WEBHOOK_URL responded with HTTP ${response.status}.`,
+            category: "network",
+            retryable: response.status >= 500 || response.status === 429,
+            fatal: response.status >= 400 && response.status < 500 && response.status !== 429,
+          });
+        }
       },
     };
 
@@ -77,11 +130,31 @@ async function main() {
       mailer,
     });
 
+    const metricsPort = Number(process.env.METRICS_PORT ?? "9464");
+    Bun.serve({
+      port: metricsPort,
+      fetch: async (request) => {
+        const url = new URL(request.url);
+        if (url.pathname !== "/metrics") {
+          return new Response("Not Found", { status: 404 });
+        }
+
+        const queueDepth = await readOutboxQueueDepth(sql!, config.database.engine_schema);
+        return new Response(createMetricsPayload(queueDepth), {
+          status: 200,
+          headers: {
+            "content-type": "text/plain; version=0.0.4; charset=utf-8",
+          },
+        });
+      },
+    });
+
     logger.info(
       {
         appSchema: config.database.app_schema,
         engineSchema: config.database.engine_schema,
         replicaEnabled: Boolean(sqlReplica),
+        metricsPort,
       },
       "DPDP Compliance Worker booted"
     );
@@ -89,7 +162,8 @@ async function main() {
     while (true) {
       try {
         const processed = await worker.processNextTask();
-        await worker.flushOutbox();
+        const relay = await worker.flushOutbox();
+        deadLettersTotal += relay.deadLettered;
 
         if (!processed) {
           await sleep(5_000);

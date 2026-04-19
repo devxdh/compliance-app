@@ -3,6 +3,7 @@ import postgres from "postgres";
 import { dispatchPreErasureNotice } from "../src/engine/notifier";
 import type { MockMailer } from "../src/engine/notifier";
 import { vaultUser } from "../src/engine/vault";
+import { runMigrations } from "../src/db/migrations";
 import {
   TEST_SECRETS,
   createTestSql,
@@ -190,5 +191,73 @@ describe("Notification Handshake Engine", () => {
 
     expect(retry.action).toBe("sent");
     expect(goodMailer.sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses configured notice columns instead of hardcoded email/full_name keys", async () => {
+    const appSchema = uniqueSchema("notify_custom_app");
+    const engineSchema = uniqueSchema("notify_custom_engine");
+    schemasToDrop.push(appSchema, engineSchema);
+
+    await dropSchemas(sql, appSchema, engineSchema);
+    await sql`CREATE SCHEMA ${sql(appSchema)}`;
+    await sql`
+      CREATE TABLE ${sql(appSchema)}.members (
+        id TEXT PRIMARY KEY,
+        user_email TEXT NOT NULL,
+        display_name TEXT NOT NULL
+      )
+    `;
+    await sql`
+      CREATE TABLE ${sql(appSchema)}.member_orders (
+        id SERIAL PRIMARY KEY,
+        member_id TEXT NOT NULL REFERENCES ${sql(appSchema)}.members(id)
+      )
+    `;
+    await sql`
+      INSERT INTO ${sql(appSchema)}.members (id, user_email, display_name)
+      VALUES ('usr_opaque_1', 'custom@example.com', 'Custom Name')
+    `;
+    await runMigrations(sql, engineSchema);
+
+    const vaultAt = new Date("2020-01-01T00:00:00.000Z");
+    await vaultUser(sql, "usr_opaque_1", TEST_SECRETS, {
+      appSchema,
+      engineSchema,
+      now: vaultAt,
+      defaultRetentionYears: 1,
+      noticeWindowHours: 48,
+      rootTable: "members",
+      rootIdColumn: "id",
+      rootPiiColumns: {
+        user_email: "HMAC",
+        display_name: "STATIC_MASK",
+      },
+      satelliteTargets: [],
+    });
+
+    const mailer: MockMailer = {
+      sendEmail: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const result = await dispatchPreErasureNotice(sql, "usr_opaque_1", TEST_SECRETS, mailer, {
+      appSchema,
+      engineSchema,
+      rootTable: "members",
+      noticeEmailColumn: "user_email",
+      noticeNameColumn: "display_name",
+      rootPiiColumns: {
+        user_email: "HMAC",
+        display_name: "STATIC_MASK",
+      },
+      now: new Date("2020-12-30T00:00:00.000Z"),
+    });
+
+    expect(result.action).toBe("sent");
+    expect(mailer.sendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "custom@example.com",
+        body: expect.stringContaining("Dear Custom Name"),
+      })
+    );
   });
 });

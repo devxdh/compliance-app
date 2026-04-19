@@ -10,15 +10,15 @@ function buildShredDryRunPlan(
   appSchema: string,
   engineSchema: string,
   rootTable: string,
-  userId: number,
+  subjectId: string | number,
   userHash: string,
   retentionExpiry: Date
 ) {
   return {
     mode: "dry-run" as const,
-    summary: `Would crypto-shred root row ${userId} (${userHash}) in ${appSchema}.${rootTable} after ${retentionExpiry.toISOString()}.`,
+    summary: `Would crypto-shred root row ${subjectId} (${userHash}) in ${appSchema}.${rootTable} after ${retentionExpiry.toISOString()}.`,
     checks: [
-      `Read ${engineSchema}.pii_vault using (${appSchema}, ${rootTable}, ${userId}) as the lookup key.`,
+      `Read ${engineSchema}.pii_vault using (${appSchema}, ${rootTable}, ${subjectId}) as the lookup key.`,
       "Confirm that retention_expiry has passed.",
       "Require a completed notification unless explicitly disabled.",
       "Delete the DEK and replace the vault payload in one transaction.",
@@ -29,7 +29,7 @@ function buildShredDryRunPlan(
     ],
     sqlSteps: [
       "BEGIN ISOLATION LEVEL REPEATABLE READ;",
-      `SELECT * FROM ${engineSchema}.pii_vault WHERE root_schema = '${appSchema}' AND root_table = '${rootTable}' AND root_id = '${userId}' FOR UPDATE;`,
+      `SELECT * FROM ${engineSchema}.pii_vault WHERE root_schema = '${appSchema}' AND root_table = '${rootTable}' AND root_id = '${subjectId}' FOR UPDATE;`,
       `DELETE FROM ${engineSchema}.user_keys WHERE user_uuid_hash = '<user-hash>';`,
       `UPDATE ${engineSchema}.pii_vault SET encrypted_pii = '{"destroyed":true}', shredded_at = '<timestamp>';`,
       `INSERT INTO ${engineSchema}.outbox (...) VALUES (... 'SHRED_SUCCESS' ...);`,
@@ -47,37 +47,38 @@ function buildShredDryRunPlan(
  * 3. Key deletion and vault mutation happen atomically inside one repeatable-read transaction.
  *
  * @param sql - Postgres connection pool used for transactional shredding.
- * @param userId - Numeric subject identifier from the root table.
+ * @param subjectId - Subject identifier from the root table.
  * @param options - Shredding overrides such as schema/table, dry-run mode, and clock injection.
  * @returns Structured shred result describing whether shredding executed, was skipped, or was simulated.
  * @throws {WorkerError} When retention/notice preconditions fail or key/vault invariants are broken.
  */
 export async function shredUser(
   sql: postgres.Sql,
-  userId: number,
+  subjectId: string | number,
   options: ShredUserOptions = {}
 ): Promise<ShredUserResult> {
-  if (!Number.isInteger(userId) || userId < 1) {
+  if ((typeof subjectId !== "string" && typeof subjectId !== "number") || String(subjectId).trim().length === 0) {
     fail({
       code: "DPDP_SHREDDER_USER_ID_INVALID",
       title: "Invalid root identifier",
-      detail: "userId must be a positive integer.",
+      detail: "subjectId must be a non-empty string or number.",
       category: "validation",
       retryable: false,
     });
   }
 
+  const normalizedSubjectId = String(subjectId);
   const { appSchema, engineSchema } = resolveSchemas(options);
   const rootTable = options.rootTable ?? "users";
   const now = options.now ? new Date(options.now) : new Date();
   const requireNotification = options.requireNotification ?? true;
 
-  const vault = await getVaultRecordByUserId(sql, engineSchema, appSchema, userId, rootTable);
+  const vault = await getVaultRecordByUserId(sql, engineSchema, appSchema, normalizedSubjectId, rootTable);
   if (!vault) {
     fail({
       code: "DPDP_SHREDDER_VAULT_NOT_FOUND",
       title: "Vault record not found",
-      detail: `Vault record not found for ${appSchema}.${rootTable}#${userId}.`,
+      detail: `Vault record not found for ${appSchema}.${rootTable}#${normalizedSubjectId}.`,
       category: "validation",
       retryable: false,
     });
@@ -94,7 +95,7 @@ export async function shredUser(
         appSchema,
         engineSchema,
         rootTable,
-        userId,
+        normalizedSubjectId,
         vault.user_uuid_hash,
         new Date(vault.retention_expiry)
       ),
@@ -107,7 +108,7 @@ export async function shredUser(
       FROM ${tx(engineSchema)}.pii_vault
       WHERE root_schema = ${appSchema}
         AND root_table = ${rootTable}
-        AND root_id = ${userId.toString()}
+        AND root_id = ${normalizedSubjectId}
       FOR UPDATE
     `;
 
@@ -115,7 +116,7 @@ export async function shredUser(
       fail({
         code: "DPDP_SHREDDER_VAULT_LOST",
         title: "Vault record vanished during shredding",
-        detail: `Vault record for ${appSchema}.${rootTable}#${userId} disappeared during shredding.`,
+        detail: `Vault record for ${appSchema}.${rootTable}#${normalizedSubjectId} disappeared during shredding.`,
         category: "concurrency",
         retryable: true,
       });
@@ -135,7 +136,7 @@ export async function shredUser(
       fail({
         code: "DPDP_SHREDDER_RETENTION_NOT_REACHED",
         title: "Retention window still active",
-        detail: `Cannot shred root row ${userId} before retention expiry (${new Date(lockedVault.retention_expiry).toISOString()}).`,
+        detail: `Cannot shred root row ${normalizedSubjectId} before retention expiry (${new Date(lockedVault.retention_expiry).toISOString()}).`,
         category: "validation",
         retryable: false,
       });
@@ -145,7 +146,7 @@ export async function shredUser(
       fail({
         code: "DPDP_SHREDDER_NOTICE_MISSING",
         title: "Pre-erasure notice missing",
-        detail: `Cannot shred root row ${userId} before the pre-erasure notice has been sent.`,
+        detail: `Cannot shred root row ${normalizedSubjectId} before the pre-erasure notice has been sent.`,
         category: "validation",
         retryable: false,
       });
@@ -161,7 +162,7 @@ export async function shredUser(
       fail({
         code: "DPDP_SHREDDER_KEY_MISSING",
         title: "Key ring record missing",
-        detail: `Cannot shred root row ${userId}: no active key exists for hash ${lockedVault.user_uuid_hash}.`,
+        detail: `Cannot shred root row ${normalizedSubjectId}: no active key exists for hash ${lockedVault.user_uuid_hash}.`,
         category: "integrity",
         retryable: false,
         fatal: true,
@@ -192,10 +193,12 @@ export async function shredUser(
         event_timestamp: now.toISOString(),
         root_schema: appSchema,
         root_table: rootTable,
-        root_id: userId.toString(),
+        root_id: normalizedSubjectId,
         shredded_at: now.toISOString(),
       },
-      lockedVault.request_id ? `shred:${lockedVault.request_id}` : `shred:${appSchema}:${rootTable}:${userId}`,
+      lockedVault.request_id
+        ? `shred:${lockedVault.request_id}`
+        : `shred:${appSchema}:${rootTable}:${normalizedSubjectId}`,
       now
     );
 
@@ -203,7 +206,7 @@ export async function shredUser(
       {
         userHash: lockedVault.user_uuid_hash,
         rootTable,
-        rootId: userId,
+        rootId: normalizedSubjectId,
       },
       "Root row crypto-shredded"
     );

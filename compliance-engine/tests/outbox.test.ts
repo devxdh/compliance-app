@@ -194,6 +194,37 @@ describe("Network Outbox Relay", () => {
     expect(rows[0]?.current_hash).toBe(first.current_hash);
   });
 
+  it("produces identical hashes for semantically equivalent payloads with different key order", async () => {
+    const { engineSchema } = await prepare();
+    const now = new Date("2026-04-15T00:00:00.000Z");
+
+    const first = await sql.begin((tx) =>
+      enqueueOutboxEvent(
+        tx,
+        engineSchema,
+        "user-hash-1",
+        "USER_VAULTED",
+        { b: "second", a: "first", nested: { y: 2, x: 1 } },
+        "vault:tenant:users:ordered",
+        now
+      )
+    );
+    const replay = await sql.begin((tx) =>
+      enqueueOutboxEvent(
+        tx,
+        engineSchema,
+        "user-hash-1",
+        "USER_VAULTED",
+        { nested: { x: 1, y: 2 }, a: "first", b: "second" },
+        "vault:tenant:users:ordered",
+        new Date("2026-04-15T00:00:30.000Z")
+      )
+    );
+
+    expect(replay.id).toBe(first.id);
+    expect(replay.current_hash).toBe(first.current_hash);
+  });
+
   it("requeues failed events with backoff and error context", async () => {
     const { engineSchema } = await prepare();
     const now = new Date("2026-04-15T00:00:00.000Z");

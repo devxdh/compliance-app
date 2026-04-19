@@ -261,15 +261,36 @@ export class ControlPlaneRepository {
    * @returns Cancelled job row or `null` if no eligible job was found.
    */
   async cancelWaitingJobByIdempotencyKey(idempotencyKey: string, now: Date): Promise<ErasureJobRow | null> {
-    const [job] = await this.sql<ErasureJobRow[]>`
-      UPDATE ${this.sql(this.schema)}.erasure_jobs
-      SET status = 'CANCELLED',
-          updated_at = ${now}
-      WHERE idempotency_key = ${idempotencyKey}::uuid
-        AND status = 'WAITING_COOLDOWN'
-      RETURNING *
-    `;
-    return job ?? null;
+    return this.sql.begin(async (tx) => {
+      const [job] = await tx<ErasureJobRow[]>`
+        UPDATE ${tx(this.schema)}.erasure_jobs
+        SET status = 'CANCELLED',
+            updated_at = ${now}
+        WHERE idempotency_key = ${idempotencyKey}::uuid
+          AND status = 'WAITING_COOLDOWN'
+        RETURNING *
+      `;
+
+      if (!job) {
+        return null;
+      }
+
+      await tx`
+        UPDATE ${tx(this.schema)}.task_queue
+        SET status = 'FAILED',
+            completed_at = ${now},
+            lease_expires_at = NULL,
+            error_text = ${JSON.stringify({
+              code: "API_TASK_CANCELLED",
+              detail: "Task cancelled because erasure request moved to CANCELLED during cooldown.",
+            })},
+            updated_at = ${now}
+        WHERE erasure_job_id = ${job.id}
+          AND status IN ('QUEUED', 'DISPATCHED')
+      `;
+
+      return job;
+    });
   }
 
   /**

@@ -10,7 +10,7 @@ import { dispatchPreErasureNotice, type MockMailer } from "./engine/notifier";
 import { shredUser } from "./engine/shredder";
 import { vaultUser } from "./engine/vault";
 import { fail, serializeWorkerError, workerError, type WorkerProblemDetails } from "./errors";
-import { processOutbox, type OutboxEvent } from "./network/outbox";
+import { processOutbox, type OutboxEvent, type ProcessOutboxResult } from "./network/outbox";
 import { getLogger, logError } from "./observability/logger";
 
 const logger = getLogger({ component: "worker" });
@@ -84,20 +84,19 @@ export interface ComplianceWorkerOptions {
   mailer: MockMailer;
 }
 
-function resolveNumericTaskSubject(task: WorkerTask): number {
-  if (typeof task.payload.userId === "number" && Number.isInteger(task.payload.userId) && task.payload.userId > 0) {
-    return task.payload.userId;
+function resolveTaskSubject(task: WorkerTask): string | number {
+  if (typeof task.payload.subject_opaque_id === "string" && task.payload.subject_opaque_id.trim().length > 0) {
+    return task.payload.subject_opaque_id.trim();
   }
 
-  const parsed = Number(task.payload.subject_opaque_id);
-  if (Number.isInteger(parsed) && parsed > 0) {
-    return parsed;
+  if (typeof task.payload.userId === "number" && Number.isInteger(task.payload.userId) && task.payload.userId > 0) {
+    return task.payload.userId;
   }
 
   fail({
     code: "DPDP_TASK_PAYLOAD_INVALID",
     title: "Invalid task payload",
-    detail: `Task ${task.id} requires a numeric user identifier for ${task.task_type}.`,
+    detail: `Task ${task.id} requires a non-empty subject_opaque_id or numeric userId for ${task.task_type}.`,
     category: "validation",
     retryable: false,
     context: { taskId: task.id, taskType: task.task_type },
@@ -178,16 +177,19 @@ export class ComplianceWorker {
         );
 
       case "NOTIFY_USER":
-        return dispatchPreErasureNotice(this.sql, resolveNumericTaskSubject(task), this.secrets, this.mailer, {
+        return dispatchPreErasureNotice(this.sql, resolveTaskSubject(task), this.secrets, this.mailer, {
           appSchema: this.config.database.app_schema,
           engineSchema: this.config.database.engine_schema,
           rootTable: this.config.graph.root_table,
           notificationLeaseSeconds: this.config.security.notification_lease_seconds,
+          noticeEmailColumn: this.config.graph.notice_email_column,
+          noticeNameColumn: this.config.graph.notice_name_column,
+          rootPiiColumns: this.config.graph.root_pii_columns,
           now,
         });
 
       case "SHRED_USER":
-        return shredUser(this.sql, resolveNumericTaskSubject(task), {
+        return shredUser(this.sql, resolveTaskSubject(task), {
           appSchema: this.config.database.app_schema,
           engineSchema: this.config.database.engine_schema,
           rootTable: this.config.graph.root_table,
@@ -255,8 +257,8 @@ export class ComplianceWorker {
    * @returns Promise resolved after one outbox processing pass.
    * @throws {WorkerError} When outbox processing detects fatal delivery/protocol errors.
    */
-  async flushOutbox(): Promise<void> {
-    await processOutbox(this.sql, async (event) => this.apiClient.pushOutboxEvent(event), {
+  async flushOutbox(): Promise<ProcessOutboxResult> {
+    return processOutbox(this.sql, async (event) => this.apiClient.pushOutboxEvent(event), {
       engineSchema: this.config.database.engine_schema,
       batchSize: this.config.outbox.batch_size,
       leaseSeconds: this.config.outbox.lease_seconds,

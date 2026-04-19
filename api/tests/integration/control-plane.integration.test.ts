@@ -1,8 +1,9 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import postgres from "postgres";
 import { createApp } from "../../src/app";
 import { createEd25519Signer } from "../../src/crypto/coe";
 import { migrateApiSchema } from "../../src/db/migrations";
+import { computeWormHash } from "../../src/modules/control-plane/hash";
 import { createTestSql, dropSchemas, uniqueSchema } from "../helpers/db";
 
 describe("Control Plane API (Integration)", () => {
@@ -58,9 +59,7 @@ describe("Control Plane API (Integration)", () => {
   }
 
   async function computeCurrentHash(previousHash: string, payload: unknown, idempotencyKey: string): Promise<string> {
-    const data = new TextEncoder().encode(`${previousHash}${JSON.stringify(payload)}${idempotencyKey}`);
-    const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
-    return Buffer.from(digest).toString("hex");
+    return computeWormHash(previousHash, payload, idempotencyKey);
   }
 
   it("rejects undeclared PII fields and missing mandatory actor metadata", async () => {
@@ -174,6 +173,18 @@ describe("Control Plane API (Integration)", () => {
       { subject_opaque_id: "usr_due", status: "EXECUTING" },
       { subject_opaque_id: "usr_future", status: "WAITING_COOLDOWN" },
     ]);
+
+    const cancelledTasks = await sql<{ status: string }[]>`
+      SELECT status
+      FROM ${sql(controlSchema)}.task_queue
+      WHERE erasure_job_id = (
+        SELECT id
+        FROM ${sql(controlSchema)}.erasure_jobs
+        WHERE subject_opaque_id = 'usr_cancel'
+      )
+    `;
+    expect(cancelledTasks).toHaveLength(1);
+    expect(cancelledTasks[0]?.status).toBe("FAILED");
   });
 
   it("cancel endpoint prevents a waiting erasure request from syncing", async () => {
@@ -358,5 +369,82 @@ describe("Control Plane API (Integration)", () => {
     expect(certificate.subject_opaque_id).toBe(request.subject_opaque_id);
     expect(certificate.legal_framework).toBe(request.legal_framework);
     expect(certificate.method).toBe("CRYPTO_SHREDDING_DEK_DELETE");
+  });
+
+  it("dispatches terminal webhook payload when webhook_url is configured", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    try {
+      const { app } = await setup();
+      const webhookUrl = "https://client.example.com/hooks/dpdp";
+      const request = buildErasureRequest({
+        subject_opaque_id: "usr_webhook",
+        cooldown_days: 0,
+        webhook_url: webhookUrl,
+      });
+      const createResponse = await app.request("/api/v1/erasure-requests", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      });
+      const created = (await createResponse.json()) as { request_id: string; task_id: string };
+
+      await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...buildWorkerAuthHeaders(),
+        },
+        body: JSON.stringify({
+          status: "completed",
+          result: { action: "vaulted" },
+        }),
+      });
+
+      const shredPayload = {
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        trigger_source: request.trigger_source,
+        legal_framework: request.legal_framework,
+        actor_opaque_id: request.actor_opaque_id,
+        applied_rule_name: "PMLA_FINANCIAL",
+        event_timestamp: "2036-04-19T10:00:00.000Z",
+        shredded_at: "2036-04-19T10:00:00.000Z",
+      };
+      const shredIdempotencyKey = `shred:${created.request_id}`;
+      const shredHash = await computeCurrentHash("GENESIS", shredPayload, shredIdempotencyKey);
+
+      const shredResponse = await app.request("/api/v1/worker/outbox", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...buildWorkerAuthHeaders(),
+        },
+        body: JSON.stringify({
+          idempotency_key: shredIdempotencyKey,
+          request_id: created.request_id,
+          subject_opaque_id: request.subject_opaque_id,
+          event_type: "SHRED_SUCCESS",
+          payload: shredPayload,
+          previous_hash: "GENESIS",
+          current_hash: shredHash,
+          event_timestamp: "2036-04-19T10:00:00.000Z",
+        }),
+      });
+      expect(shredResponse.status).toBe(202);
+      expect(fetchSpy).toHaveBeenCalledWith(
+        webhookUrl,
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+        })
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

@@ -65,6 +65,9 @@ export interface VaultUserOptions extends WorkerSchemas, WorkerTimingOptions {
 export interface DispatchNoticeOptions extends WorkerSchemas, WorkerTimingOptions {
   rootTable?: string;
   notificationLeaseSeconds?: number;
+  noticeEmailColumn?: string;
+  noticeNameColumn?: string;
+  rootPiiColumns?: RootPiiColumns;
 }
 
 /**

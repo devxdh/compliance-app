@@ -1,6 +1,6 @@
 import type { CoeSigner } from "../../crypto/coe";
-import { fail } from "../../errors";
-import { computeTokenHash, computeWormHash } from "./hash";
+import { ApiError, fail } from "../../errors";
+import { canonicalJsonStringify, computeTokenHash, computeWormHash } from "./hash";
 import { ControlPlaneRepository, type ErasureJobRow } from "./repository";
 import type { CreateErasureRequestInput, WorkerAckInput, WorkerOutboxEventInput } from "./schemas";
 
@@ -10,6 +10,7 @@ interface ServiceOptions {
   workerSharedSecret: string;
   workerClientName: string;
   maxOutboxPayloadBytes: number;
+  webhookTimeoutMs?: number;
   now?: () => Date;
 }
 
@@ -23,6 +24,7 @@ export class ControlPlaneService {
   private readonly workerSharedSecret: string;
   private readonly workerClientName: string;
   private readonly maxOutboxPayloadBytes: number;
+  private readonly webhookTimeoutMs: number;
 
   constructor(options: ServiceOptions) {
     this.repository = options.repository;
@@ -30,6 +32,7 @@ export class ControlPlaneService {
     this.workerSharedSecret = options.workerSharedSecret;
     this.workerClientName = options.workerClientName;
     this.maxOutboxPayloadBytes = options.maxOutboxPayloadBytes;
+    this.webhookTimeoutMs = options.webhookTimeoutMs ?? 10_000;
     this.now = options.now ?? (() => new Date());
   }
 
@@ -45,22 +48,68 @@ export class ControlPlaneService {
     };
   }
 
-  /**
-   * Normalizes JSON values so semantic equality is stable even when JSONB reorders keys.
-   */
-  private canonicalizeJson(value: unknown): unknown {
-    if (Array.isArray(value)) {
-      return value.map((item) => this.canonicalizeJson(item));
+  private async dispatchTerminalWebhook(
+    webhookUrl: string,
+    payload: {
+      request_id: string;
+      subject_opaque_id: string;
+      event_type: "SHRED_SUCCESS" | "USER_HARD_DELETED";
+      legal_framework: string;
+      shredded_at: string;
+      certificate: {
+        request_id: string;
+        subject_opaque_id: string;
+        method: string;
+        legal_framework: string;
+        shredded_at: string;
+        signature: {
+          algorithm: string;
+          key_id: string;
+          signature_base64: string;
+          public_key_spki_base64: string;
+        };
+      };
     }
+  ): Promise<void> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.webhookTimeoutMs);
 
-    if (value && typeof value === "object") {
-      const entries = Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, nestedValue]) => [key, this.canonicalizeJson(nestedValue)]);
-      return Object.fromEntries(entries);
+    try {
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        fail({
+          code: "API_WEBHOOK_DELIVERY_FAILED",
+          title: "Terminal webhook delivery failed",
+          detail: `Webhook ${webhookUrl} responded with HTTP ${response.status}.`,
+          status: 502,
+          category: "external",
+          retryable: true,
+        });
+      }
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      fail({
+        code: "API_WEBHOOK_DELIVERY_FAILED",
+        title: "Terminal webhook delivery failed",
+        detail: `Failed to deliver terminal webhook to ${webhookUrl}.`,
+        status: 502,
+        category: "external",
+        retryable: true,
+        cause: error,
+      });
+    } finally {
+      clearTimeout(timer);
     }
-
-    return value;
   }
 
   private isCreateRequestEquivalent(existing: ErasureJobRow, input: CreateErasureRequestInput): boolean {
@@ -104,8 +153,7 @@ export class ControlPlaneService {
     }
 
     return (
-      JSON.stringify(this.canonicalizeJson(existing.payload)) ===
-      JSON.stringify(this.canonicalizeJson(this.buildOutboxPayload(input)))
+      canonicalJsonStringify(existing.payload) === canonicalJsonStringify(this.buildOutboxPayload(input))
     );
   }
 
@@ -441,6 +489,30 @@ export class ControlPlaneService {
         keyId: signature.keyId,
         algorithm: signature.algorithm,
       });
+
+      if (job.webhook_url) {
+        await this.dispatchTerminalWebhook(job.webhook_url, {
+          request_id: job.id,
+          subject_opaque_id: job.subject_opaque_id,
+          event_type: input.event_type,
+          legal_framework: job.legal_framework,
+          shredded_at: shreddedAt.toISOString(),
+          certificate: {
+            request_id: job.id,
+            subject_opaque_id: job.subject_opaque_id,
+            method:
+              input.event_type === "SHRED_SUCCESS" ? "CRYPTO_SHREDDING_DEK_DELETE" : "DIRECT_DELETE_ROOT_ROW",
+            legal_framework: job.legal_framework,
+            shredded_at: shreddedAt.toISOString(),
+            signature: {
+              algorithm: signature.algorithm,
+              key_id: signature.keyId,
+              signature_base64: signature.signatureBase64,
+              public_key_spki_base64: signature.publicKeySpkiBase64,
+            },
+          },
+        });
+      }
     } else {
       await this.repository.transitionJobFromOutbox({
         jobId: input.request_id,

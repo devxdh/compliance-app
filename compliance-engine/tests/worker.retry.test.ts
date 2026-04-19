@@ -223,4 +223,62 @@ describe("ComplianceWorker failure handling", () => {
       retryable: true,
     });
   });
+
+  it("accepts non-numeric subject_opaque_id values for notifier and shredder tasks", async () => {
+    const { worker, apiClient } = buildWorker();
+    apiClient.ackTask.mockResolvedValue(true);
+
+    dispatchPreErasureNoticeMock.mockResolvedValue({
+      action: "sent",
+      userHash: "b".repeat(64),
+      dryRun: false,
+      retentionExpiry: "2026-01-01T00:00:00.000Z",
+      notificationDueAt: "2025-12-30T00:00:00.000Z",
+      notificationSentAt: "2025-12-30T00:00:00.000Z",
+      outboxEventType: "NOTIFICATION_SENT",
+    });
+    shredUserMock.mockResolvedValue({
+      action: "shredded",
+      userHash: "b".repeat(64),
+      dryRun: false,
+      shreddedAt: "2026-01-01T00:00:00.000Z",
+      outboxEventType: "SHRED_SUCCESS",
+    });
+
+    apiClient.syncTask.mockResolvedValueOnce({
+      pending: true,
+      task: {
+        id: "task-notify-opaque",
+        task_type: "NOTIFY_USER",
+        payload: {
+          subject_opaque_id: "usr_8847a92b_4f1c_882a",
+        },
+      },
+    });
+    await expect(worker.processNextTask()).resolves.toBe(true);
+    expect(dispatchPreErasureNoticeMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "usr_8847a92b_4f1c_882a",
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    );
+
+    apiClient.syncTask.mockResolvedValueOnce({
+      pending: true,
+      task: {
+        id: "task-shred-opaque",
+        task_type: "SHRED_USER",
+        payload: {
+          subject_opaque_id: "usr_8847a92b_4f1c_882a",
+        },
+      },
+    });
+    await expect(worker.processNextTask()).resolves.toBe(true);
+    expect(shredUserMock).toHaveBeenCalledWith(
+      expect.anything(),
+      "usr_8847a92b_4f1c_882a",
+      expect.anything()
+    );
+  });
 });

@@ -147,6 +147,8 @@ const workerYamlSchema = z
         root_id_column: z.string().min(1),
         max_depth: z.number().int().min(1).max(32),
         root_pii_columns: rootPiiColumnsSchema,
+        notice_email_column: z.string().min(1).optional(),
+        notice_name_column: z.string().min(1).optional(),
       })
       .strict(),
     satellite_targets: z.array(satelliteTargetSchema).min(1),
@@ -212,6 +214,30 @@ const workerYamlSchema = z
         path: ["graph", "root_id_column"],
       });
     }
+
+    if (value.graph.notice_email_column) {
+      try {
+        assertIdentifier(value.graph.notice_email_column, "graph notice email column");
+      } catch (error) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: error instanceof Error ? error.message : "Invalid graph notice email column.",
+          path: ["graph", "notice_email_column"],
+        });
+      }
+    }
+
+    if (value.graph.notice_name_column) {
+      try {
+        assertIdentifier(value.graph.notice_name_column, "graph notice name column");
+      } catch (error) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: error instanceof Error ? error.message : "Invalid graph notice name column.",
+          path: ["graph", "notice_name_column"],
+        });
+      }
+    }
   });
 
 type WorkerYamlConfig = z.infer<typeof workerYamlSchema>;
@@ -270,6 +296,12 @@ function normalizeWorkerYaml(config: WorkerYamlConfig): WorkerYamlConfig {
       ...config.graph,
       root_table: assertIdentifier(config.graph.root_table, "graph root table"),
       root_id_column: assertIdentifier(config.graph.root_id_column, "graph root id column"),
+      notice_email_column: config.graph.notice_email_column
+        ? assertIdentifier(config.graph.notice_email_column, "graph notice email column")
+        : undefined,
+      notice_name_column: config.graph.notice_name_column
+        ? assertIdentifier(config.graph.notice_name_column, "graph notice name column")
+        : undefined,
       root_pii_columns: Object.fromEntries(
         Object.entries(config.graph.root_pii_columns).map(([column, rule]) => [
           assertIdentifier(column, "graph root pii column"),

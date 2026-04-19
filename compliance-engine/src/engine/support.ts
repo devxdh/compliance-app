@@ -3,6 +3,7 @@ import { generateHMAC } from "../crypto/hmac";
 import { assertIdentifier, quoteQualifiedIdentifier } from "../db/identifiers";
 import type { WorkerSchemas, WorkerSecrets } from "./contracts";
 import { sha256Hex } from "../utils/digest";
+import { canonicalJsonStringify } from "../utils/json";
 import { fail } from "../errors";
 
 export const DEFAULT_APP_SCHEMA = "mock_app";
@@ -331,8 +332,10 @@ export async function enqueueOutboxEvent(
   now: Date
 ): Promise<OutboxRow> {
   const jsonPayload = payload as postgres.JSONValue;
-  const serializedPayload = JSON.stringify(jsonPayload);
-  if (serializedPayload === undefined) {
+  let serializedPayload: string;
+  try {
+    serializedPayload = canonicalJsonStringify(jsonPayload);
+  } catch {
     fail({
       code: "DPDP_OUTBOX_PAYLOAD_INVALID",
       title: "Invalid outbox payload",
