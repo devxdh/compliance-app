@@ -8,3 +8,4 @@ sessions
 *.tsbuildinfo
 .DS_Store
 **/.codex
+.codex
