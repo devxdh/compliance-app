@@ -33,6 +33,8 @@ export async function runMigrations(sql: postgres.Sql, engineSchema: string = "d
     await tx`
       CREATE TABLE IF NOT EXISTS ${tx(safeEngineSchema)}.pii_vault (
         user_uuid_hash TEXT PRIMARY KEY,
+        request_id TEXT,
+        tenant_id TEXT NOT NULL DEFAULT '',
         root_schema TEXT NOT NULL,
         root_table TEXT NOT NULL,
         root_id TEXT NOT NULL,
@@ -40,6 +42,10 @@ export async function runMigrations(sql: postgres.Sql, engineSchema: string = "d
         encrypted_pii JSONB NOT NULL,
         salt TEXT NOT NULL,
         dependency_count INTEGER NOT NULL DEFAULT 0,
+        trigger_source TEXT,
+        legal_framework TEXT,
+        actor_opaque_id TEXT,
+        applied_rule_name TEXT,
         retention_expiry TIMESTAMPTZ NOT NULL,
         notification_due_at TIMESTAMPTZ NOT NULL,
         notification_sent_at TIMESTAMPTZ,
@@ -53,11 +59,17 @@ export async function runMigrations(sql: postgres.Sql, engineSchema: string = "d
 
     await tx`
       ALTER TABLE ${tx(safeEngineSchema)}.pii_vault
+      ADD COLUMN IF NOT EXISTS request_id TEXT,
+      ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '',
       ADD COLUMN IF NOT EXISTS root_schema TEXT,
       ADD COLUMN IF NOT EXISTS root_table TEXT,
       ADD COLUMN IF NOT EXISTS root_id TEXT,
       ADD COLUMN IF NOT EXISTS pseudonym TEXT,
       ADD COLUMN IF NOT EXISTS dependency_count INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS trigger_source TEXT,
+      ADD COLUMN IF NOT EXISTS legal_framework TEXT,
+      ADD COLUMN IF NOT EXISTS actor_opaque_id TEXT,
+      ADD COLUMN IF NOT EXISTS applied_rule_name TEXT,
       ADD COLUMN IF NOT EXISTS notification_due_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS notification_sent_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS notification_lock_id UUID,
@@ -68,12 +80,17 @@ export async function runMigrations(sql: postgres.Sql, engineSchema: string = "d
 
     await tx`
       CREATE UNIQUE INDEX IF NOT EXISTS pii_vault_root_lookup_idx
-      ON ${tx(safeEngineSchema)}.pii_vault (root_schema, root_table, root_id)
+      ON ${tx(safeEngineSchema)}.pii_vault (root_schema, root_table, root_id, tenant_id)
     `;
 
     await tx`
       CREATE INDEX IF NOT EXISTS pii_vault_retention_idx
       ON ${tx(safeEngineSchema)}.pii_vault (retention_expiry, notification_due_at)
+    `;
+
+    await tx`
+      CREATE INDEX IF NOT EXISTS pii_vault_request_idx
+      ON ${tx(safeEngineSchema)}.pii_vault (request_id)
     `;
 
     await tx`

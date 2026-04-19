@@ -1,17 +1,51 @@
 import { Hono } from "hono";
+import type { Context, Next } from "hono";
 import type postgres from "postgres";
 import type { CoeSigner } from "./crypto/coe";
+import { asApiError, serializeApiError } from "./errors";
 import { ControlPlaneRepository } from "./modules/control-plane/repository";
 import { createControlPlaneRouter } from "./modules/control-plane/router";
 import { ControlPlaneService } from "./modules/control-plane/service";
+import { getLogger, logError } from "./observability/logger";
 
 export interface CreateAppOptions {
   sql: postgres.Sql;
   controlSchema: string;
   signer: CoeSigner;
   workerSharedSecret: string;
+  workerClientName?: string;
   maxOutboxPayloadBytes?: number;
   taskLeaseSeconds?: number;
+}
+
+const logger = getLogger({ component: "http" });
+
+function getRequestLogger(c: Context) {
+  return logger.child({
+    requestId: c.get("requestId"),
+    method: c.req.method,
+    path: c.req.path,
+  });
+}
+
+async function requestContextMiddleware(c: Context, next: Next) {
+  const requestId = c.req.header("x-request-id") ?? globalThis.crypto.randomUUID();
+  c.set("requestId", requestId);
+  c.header("x-request-id", requestId);
+
+  const startedAt = performance.now();
+  try {
+    await next();
+  } finally {
+    const durationMs = Math.round((performance.now() - startedAt) * 100) / 100;
+    getRequestLogger(c).info(
+      {
+        status: c.res.status,
+        duration_ms: durationMs,
+      },
+      "HTTP request completed"
+    );
+  }
 }
 
 /**
@@ -28,7 +62,34 @@ export function createApp(options: CreateAppOptions) {
     repository,
     signer: options.signer,
     workerSharedSecret: options.workerSharedSecret,
+    workerClientName: options.workerClientName ?? "worker-1",
     maxOutboxPayloadBytes: options.maxOutboxPayloadBytes ?? 32_768,
+  });
+
+  app.use("*", requestContextMiddleware);
+
+  app.onError((error, c) => {
+    const normalized = logError(getRequestLogger(c), error, "HTTP request failed");
+    return new Response(JSON.stringify(normalized.toProblem(c.req.path)), {
+      status: normalized.status,
+      headers: {
+        "content-type": "application/json",
+      },
+    });
+  });
+
+  app.notFound((c) => {
+    const problem = serializeApiError(
+      asApiError(undefined, {
+        code: "API_ROUTE_NOT_FOUND",
+        title: "Route not found",
+        detail: `No route matches ${c.req.method} ${c.req.path}.`,
+        status: 404,
+        category: "validation",
+      }),
+      c.req.path
+    );
+    return c.json(problem, 404);
   });
 
   app.get("/health", (c) => c.json({ ok: true }, 200));

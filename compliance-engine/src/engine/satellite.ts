@@ -31,7 +31,8 @@ export async function redactSatelliteTable(
   lookupColumn: string,
   lookupValue: string,
   newHmacValue: string,
-  batchSize: number = 1000
+  batchSize: number = 1000,
+  tenantId?: string
 ): Promise<number> {
   if (!Number.isInteger(batchSize) || batchSize < 1) {
     fail({
@@ -48,11 +49,13 @@ export async function redactSatelliteTable(
   let totalRedacted = 0;
 
   while (true) {
+    const tenantFilter = tenantId ? tx` AND tenant_id = ${tenantId}` : tx``;
     const updatedRows = await tx<SatelliteRowId[]>`
       WITH batch AS (
         SELECT id
         FROM ${tx(schema)}.${tx(table)}
         WHERE ${tx(safeLookupColumn)} = ${lookupValue}
+        ${tenantFilter}
         LIMIT ${batchSize}
         FOR UPDATE SKIP LOCKED
       )

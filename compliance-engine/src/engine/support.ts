@@ -8,12 +8,14 @@ import { fail } from "../errors";
 export const DEFAULT_APP_SCHEMA = "mock_app";
 export const DEFAULT_ENGINE_SCHEMA = "dpdp_engine";
 export const DEFAULT_NOTICE_WINDOW_HOURS = 48;
-export const DEFAULT_RETENTION_YEARS = 5;
+export const DEFAULT_RETENTION_YEARS = 0;
 export const DEFAULT_GRAPH_MAX_DEPTH = 32;
 export const DESTROYED_PII_SENTINEL = Object.freeze({ v: 1, destroyed: true });
 
 export interface VaultRecord {
   user_uuid_hash: string;
+  request_id: string | null;
+  tenant_id: string;
   root_schema: string;
   root_table: string;
   root_id: string;
@@ -21,6 +23,10 @@ export interface VaultRecord {
   encrypted_pii: { v?: number; data?: string; destroyed?: boolean };
   salt: string;
   dependency_count: number;
+  trigger_source: string | null;
+  legal_framework: string | null;
+  actor_opaque_id: string | null;
+  applied_rule_name: string | null;
   retention_expiry: Date;
   notification_due_at: Date;
   notification_sent_at: Date | null;
@@ -86,11 +92,11 @@ export function resolveRetentionYears(years?: number): number {
     return DEFAULT_RETENTION_YEARS;
   }
 
-  if (!Number.isInteger(years) || years < 1) {
+  if (!Number.isInteger(years) || years < 0) {
     fail({
       code: "DPDP_RETENTION_YEARS_INVALID",
       title: "Invalid retention period",
-      detail: "retentionYears must be an integer greater than 0.",
+      detail: "retentionYears must be an integer greater than or equal to 0.",
       category: "validation",
       retryable: false,
     });
@@ -151,16 +157,9 @@ export function calculateRetentionWindow(now: Date, retentionYears: number, noti
   const retentionExpiry = new Date(now);
   retentionExpiry.setUTCFullYear(retentionExpiry.getUTCFullYear() + retentionYears);
 
-  const notificationDueAt = new Date(retentionExpiry.getTime() - noticeWindowHours * 60 * 60 * 1000);
-  if (notificationDueAt <= now) {
-    fail({
-      code: "DPDP_RETENTION_WINDOW_INVALID",
-      title: "Invalid retention window",
-      detail: "noticeWindowHours is too large for the configured retentionYears.",
-      category: "validation",
-      retryable: false,
-    });
-  }
+  const notificationDueAt = new Date(
+    Math.max(now.getTime(), retentionExpiry.getTime() - noticeWindowHours * 60 * 60 * 1000)
+  );
 
   return {
     retentionExpiry,
@@ -172,28 +171,43 @@ export async function createUserHash(
   rootId: string | number,
   appSchema: string,
   rootTable: string,
-  hmacKey: Uint8Array
+  hmacKey: Uint8Array,
+  tenantId?: string
 ): Promise<string> {
-  return generateHMAC(`${appSchema}:${rootTable}:${rootId}`, Buffer.from(hmacKey).toString("base64"));
+  return generateHMAC(
+    `${appSchema}:${rootTable}:${tenantId ?? ""}:${rootId}`,
+    Buffer.from(hmacKey).toString("base64")
+  );
 }
 
-export async function createPseudonym(userId: number, email: string, salt: string, hmacKey: Uint8Array): Promise<string> {
+export async function createPseudonym(
+  userId: string | number,
+  email: string,
+  salt: string,
+  hmacKey: Uint8Array
+): Promise<string> {
   const digest = await generateHMAC(`${userId}:${email}`, `${salt}:${Buffer.from(hmacKey).toString("base64")}`);
   return `dpdp_${digest.slice(0, 24)}@dpdp.invalid`;
 }
 
 export function buildUserLookupSql(engineSchema: string): string {
-  return `SELECT * FROM ${quoteQualifiedIdentifier(engineSchema, "pii_vault")} WHERE root_schema = $1 AND root_table = $2 AND root_id = $3`;
+  return `SELECT * FROM ${quoteQualifiedIdentifier(engineSchema, "pii_vault")} WHERE root_schema = $1 AND root_table = $2 AND root_id = $3 AND tenant_id = $4`;
 }
 
 export async function getVaultRecordByUserId(
   sql: SqlExecutor,
   engineSchema: string,
   appSchema: string,
-  userId: number,
-  rootTable: string = "users"
+  userId: string | number,
+  rootTable: string = "users",
+  tenantId?: string
 ): Promise<VaultRecord | null> {
-  const rows = await sql.unsafe<VaultRecord[]>(buildUserLookupSql(engineSchema), [appSchema, rootTable, userId.toString()]);
+  const rows = await sql.unsafe<VaultRecord[]>(buildUserLookupSql(engineSchema), [
+    appSchema,
+    rootTable,
+    userId.toString(),
+    tenantId ?? "",
+  ]);
   return rows[0] ?? null;
 }
 

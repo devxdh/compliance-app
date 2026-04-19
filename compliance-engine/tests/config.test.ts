@@ -36,8 +36,17 @@ database:
   engine_schema: tenant_engine
   replica_db_url: postgres://replica:replica@replica-host:5432/postgres
 compliance_policy:
-  retention_years: 7
+  default_retention_years: 0
   notice_window_hours: 72
+  retention_rules:
+    - rule_name: PMLA_FINANCIAL
+      if_has_data_in:
+        - transactions
+      retention_years: 10
+    - rule_name: RBI_KYC
+      if_has_data_in:
+        - kyc_documents
+      retention_years: 5
 graph:
   root_table: users
   root_id_column: id
@@ -79,8 +88,20 @@ integrity:
     expect(config.database.app_schema).toBe("tenant_app");
     expect(config.database.engine_schema).toBe("tenant_engine");
     expect(config.database.replica_db_url).toBe("postgres://replica:replica@replica-host:5432/postgres");
-    expect(config.compliance_policy.retention_years).toBe(7);
+    expect(config.compliance_policy.default_retention_years).toBe(0);
     expect(config.compliance_policy.notice_window_hours).toBe(72);
+    expect(config.compliance_policy.retention_rules).toEqual([
+      {
+        rule_name: "PMLA_FINANCIAL",
+        if_has_data_in: ["transactions"],
+        retention_years: 10,
+      },
+      {
+        rule_name: "RBI_KYC",
+        if_has_data_in: ["kyc_documents"],
+        retention_years: 5,
+      },
+    ]);
     expect(config.graph.root_table).toBe("users");
     expect(config.graph.root_id_column).toBe("id");
     expect(config.graph.root_pii_columns).toEqual({
@@ -101,8 +122,13 @@ database:
   app_schema: tenant_app
   engine_schema: tenant_engine
 compliance_policy:
-  retention_years: null
+  default_retention_years: null
   notice_window_hours: 48
+  retention_rules:
+    - rule_name: RBI_KYC
+      if_has_data_in:
+        - kyc_documents
+      retention_years: 5
 graph:
   root_table: users
   root_id_column: id
@@ -137,7 +163,7 @@ integrity:
         },
         path
       )
-    ).toThrow(/retention_years/i);
+    ).toThrow(/default_retention_years/i);
   });
 
   it("rejects malicious identifier injection in root_table", async () => {
@@ -147,8 +173,13 @@ database:
   app_schema: tenant_app
   engine_schema: tenant_engine
 compliance_policy:
-  retention_years: 5
+  default_retention_years: 0
   notice_window_hours: 48
+  retention_rules:
+    - rule_name: RBI_KYC
+      if_has_data_in:
+        - kyc_documents
+      retention_years: 5
 graph:
   root_table: "users; DROP TABLE clients;--"
   root_id_column: id

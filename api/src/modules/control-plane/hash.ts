@@ -1,8 +1,8 @@
 /**
  * Computes a SHA-256 hex digest for the WORM audit chain.
  */
-export async function computeWormHash(previousHash: string, payload: unknown): Promise<string> {
-  const data = new TextEncoder().encode(`${previousHash}${JSON.stringify(payload)}`);
+export async function computeWormHash(previousHash: string, payload: unknown, idempotencyKey: string): Promise<string> {
+  const data = new TextEncoder().encode(`${previousHash}${JSON.stringify(payload)}${idempotencyKey}`);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
   return Buffer.from(digest).toString("hex");
 }
@@ -15,4 +15,3 @@ export async function computeTokenHash(token: string): Promise<string> {
   const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
   return Buffer.from(digest).toString("hex");
 }
-

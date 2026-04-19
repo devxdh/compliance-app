@@ -40,7 +40,7 @@ describe("Notification Handshake Engine", () => {
       appSchema,
       engineSchema,
       now: vaultAt,
-      retentionYears: 1,
+      defaultRetentionYears: 1,
       noticeWindowHours: 48,
       rootTable: "users",
       rootIdColumn: "id",

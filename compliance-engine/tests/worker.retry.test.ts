@@ -35,8 +35,9 @@ function buildConfig() {
       engine_schema: "tenant_engine",
     },
     compliance_policy: {
-      retention_years: 5,
+      default_retention_years: 0,
       notice_window_hours: 48,
+      retention_rules: [],
     },
     graph: {
       root_table: "users",
@@ -209,6 +210,8 @@ describe("ComplianceWorker failure handling", () => {
       userHash: "a".repeat(64),
       dryRun: false,
       dependencyCount: 1,
+      retentionYears: 10,
+      appliedRuleName: "PMLA_FINANCIAL",
       retentionExpiry: "2026-01-01T00:00:00.000Z",
       notificationDueAt: "2025-12-30T00:00:00.000Z",
       pseudonym: "dpdp_example@dpdp.invalid",

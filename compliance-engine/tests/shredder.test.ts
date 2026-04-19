@@ -39,7 +39,7 @@ describe("Crypto-Shredder Engine", () => {
       appSchema,
       engineSchema,
       now: new Date("2020-01-01T00:00:00.000Z"),
-      retentionYears: 1,
+      defaultRetentionYears: 1,
       noticeWindowHours: 48,
       rootTable: "users",
       rootIdColumn: "id",

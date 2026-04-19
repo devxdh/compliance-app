@@ -1,17 +1,42 @@
 import { z } from "zod";
 
-const hash64 = z
-  .string()
-  .regex(/^[0-9a-fA-F]{64}$/, "must be a 64-character hex digest")
-  .transform((value) => value.toLowerCase());
+const isoDateTime = z.string().datetime();
+
+export const erasureTriggerSourceSchema = z.enum([
+  "USER_CONSENT_WITHDRAWAL",
+  "PURPOSE_FULFILLED",
+  "ADMIN_PURGE",
+]);
+
+export const erasureRequestStatusSchema = z.enum([
+  "WAITING_COOLDOWN",
+  "EXECUTING",
+  "VAULTED",
+  "NOTICE_SENT",
+  "SHREDDED",
+  "FAILED",
+  "CANCELLED",
+]);
+
+export const outboxEventTypeSchema = z.enum([
+  "USER_VAULTED",
+  "NOTIFICATION_SENT",
+  "SHRED_SUCCESS",
+  "USER_HARD_DELETED",
+]);
 
 export const createErasureRequestSchema = z
   .object({
-    clientId: z.string().min(1),
-    targetHash: hash64,
-    legalBasis: z.enum(["DPDP_SEC_8_7", "CONSENT_WITHDRAWAL", "PURPOSE_EXHAUSTED"]),
-    retentionYears: z.number().int().min(1).max(8),
-    rootUserId: z.number().int().min(1).optional(),
+    subject_opaque_id: z.string().min(1),
+    idempotency_key: z.string().uuid(),
+    trigger_source: erasureTriggerSourceSchema,
+    actor_opaque_id: z.string().min(1),
+    legal_framework: z.string().min(1),
+    request_timestamp: isoDateTime,
+    tenant_id: z.string().min(1).optional(),
+    cooldown_days: z.number().int().min(0).default(30),
+    shadow_mode: z.boolean().default(false),
+    webhook_url: z.string().url().optional(),
   })
   .strict();
 
@@ -24,28 +49,44 @@ export const workerAckSchema = z
 
 export const workerOutboxEventSchema = z
   .object({
-    idempotencyKey: z.string().min(1),
-    requestId: z.string().min(1),
-    targetHash: hash64,
-    eventType: z.enum(["USER_VAULTED", "NOTIFICATION_SENT", "SHRED_SUCCESS"]),
-    payload: z.record(z.string(), z.unknown()).or(z.array(z.unknown())).or(z.string()).or(z.number()).or(z.boolean()).or(z.null()),
-    previousHash: z
+    idempotency_key: z.string().min(1),
+    request_id: z.string().uuid(),
+    subject_opaque_id: z.string().min(1),
+    event_type: outboxEventTypeSchema,
+    payload: z.record(z.string(), z.unknown()),
+    previous_hash: z
       .string()
       .refine(
-        (value) => value === "GENESIS" || /^[0-9a-fA-F]{64}$/.test(value),
+        (value) => value === "GENESIS" || /^[0-9a-f]{64}$/i.test(value),
         "must be GENESIS or a 64-character hex digest"
       )
       .transform((value) => (value === "GENESIS" ? value : value.toLowerCase())),
-    currentHash: z.string().regex(/^[0-9a-fA-F]{64}$/).transform((value) => value.toLowerCase()),
-    eventTimestamp: z.iso.datetime(),
+    current_hash: z.string().regex(/^[0-9a-f]{64}$/i).transform((value) => value.toLowerCase()),
+    event_timestamp: isoDateTime,
   })
   .strict();
 
-export const workerHeaderSchema = z.object({
-  "x-client-id": z.string().min(1),
-  authorization: z.string().regex(/^Bearer\s+\S+$/),
-});
+export const workerHeaderSchema = z
+  .object({
+    "x-client-id": z.string().min(1),
+    authorization: z.string().regex(/^Bearer\s+\S+$/),
+  });
+
+export const requestIdParamSchema = z
+  .object({
+    requestId: z.string().uuid(),
+  })
+  .strict();
+
+export const idempotencyKeyParamSchema = z
+  .object({
+    idempotency_key: z.string().uuid(),
+  })
+  .strict();
 
 export type CreateErasureRequestInput = z.infer<typeof createErasureRequestSchema>;
+export type ErasureTriggerSource = z.infer<typeof erasureTriggerSourceSchema>;
+export type ErasureRequestStatus = z.infer<typeof erasureRequestStatusSchema>;
+export type OutboxEventType = z.infer<typeof outboxEventTypeSchema>;
 export type WorkerAckInput = z.infer<typeof workerAckSchema>;
 export type WorkerOutboxEventInput = z.infer<typeof workerOutboxEventSchema>;

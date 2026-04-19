@@ -171,12 +171,20 @@ export async function shredUser(
       lockedVault.user_uuid_hash,
       "SHRED_SUCCESS",
       {
-        rootSchema: appSchema,
-        rootTable,
-        rootId: userId.toString(),
-        shreddedAt: now.toISOString(),
+        request_id: lockedVault.request_id,
+        subject_opaque_id: lockedVault.root_id,
+        tenant_id: lockedVault.tenant_id || null,
+        trigger_source: lockedVault.trigger_source,
+        legal_framework: lockedVault.legal_framework,
+        actor_opaque_id: lockedVault.actor_opaque_id,
+        applied_rule_name: lockedVault.applied_rule_name,
+        event_timestamp: now.toISOString(),
+        root_schema: appSchema,
+        root_table: rootTable,
+        root_id: userId.toString(),
+        shredded_at: now.toISOString(),
       },
-      `shred:${appSchema}:${rootTable}:${userId}`,
+      lockedVault.request_id ? `shred:${lockedVault.request_id}` : `shred:${appSchema}:${rootTable}:${userId}`,
       now
     );
 

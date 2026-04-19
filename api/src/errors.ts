@@ -1,0 +1,204 @@
+import { HTTPException } from "hono/http-exception";
+import { ZodError } from "zod";
+
+export type ApiErrorCode = `API_${string}`;
+
+export type ApiErrorCategory =
+  | "validation"
+  | "authentication"
+  | "authorization"
+  | "configuration"
+  | "database"
+  | "concurrency"
+  | "external"
+  | "integrity"
+  | "internal";
+
+export interface ApiErrorContext {
+  [key: string]: unknown;
+}
+
+export interface ApiProblemDetails {
+  type: string;
+  title: string;
+  detail: string;
+  status: number;
+  code: ApiErrorCode;
+  category: ApiErrorCategory;
+  retryable: boolean;
+  fatal: boolean;
+  instance?: string;
+  context?: ApiErrorContext;
+  cause?: ApiProblemDetails;
+}
+
+export interface ApiErrorOptions {
+  code: ApiErrorCode;
+  title: string;
+  detail: string;
+  status: number;
+  category: ApiErrorCategory;
+  retryable?: boolean;
+  fatal?: boolean;
+  context?: ApiErrorContext;
+  cause?: unknown;
+  type?: string;
+}
+
+export interface ApiErrorFallback {
+  code?: ApiErrorCode;
+  title?: string;
+  detail?: string;
+  status?: number;
+  category?: ApiErrorCategory;
+  retryable?: boolean;
+  fatal?: boolean;
+  context?: ApiErrorContext;
+}
+
+function normalizeType(code: ApiErrorCode): string {
+  return `urn:dpdp:api:error:${code.toLowerCase().replace(/^api_/, "")}`;
+}
+
+function buildCause(cause: unknown): Error | undefined {
+  if (cause instanceof Error) {
+    return cause;
+  }
+
+  if (cause === undefined) {
+    return undefined;
+  }
+
+  return new Error(typeof cause === "string" ? cause : JSON.stringify(cause));
+}
+
+function getCause(error: Error): unknown {
+  return (error as Error & { cause?: unknown }).cause;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isProblem(value: unknown): value is ApiProblemDetails {
+  return isRecord(value) && typeof value.code === "string" && typeof value.detail === "string";
+}
+
+export class ApiError extends Error {
+  readonly type: string;
+  readonly title: string;
+  readonly detail: string;
+  readonly status: number;
+  readonly code: ApiErrorCode;
+  readonly category: ApiErrorCategory;
+  readonly retryable: boolean;
+  readonly fatal: boolean;
+  readonly context?: ApiErrorContext;
+
+  constructor(options: ApiErrorOptions) {
+    super(options.detail, { cause: buildCause(options.cause) });
+    this.name = "ApiError";
+    this.type = options.type ?? normalizeType(options.code);
+    this.title = options.title;
+    this.detail = options.detail;
+    this.status = options.status;
+    this.code = options.code;
+    this.category = options.category;
+    this.retryable = options.retryable ?? false;
+    this.fatal = options.fatal ?? false;
+    this.context = options.context;
+  }
+
+  toProblem(instance?: string): ApiProblemDetails {
+    const cause = this.cause ? asApiError(this.cause).toProblem() : undefined;
+
+    return {
+      type: this.type,
+      title: this.title,
+      detail: this.detail,
+      status: this.status,
+      code: this.code,
+      category: this.category,
+      retryable: this.retryable,
+      fatal: this.fatal,
+      ...(instance ? { instance } : {}),
+      ...(this.context ? { context: this.context } : {}),
+      ...(cause ? { cause } : {}),
+    };
+  }
+}
+
+export function apiError(options: ApiErrorOptions): ApiError {
+  return new ApiError(options);
+}
+
+export function fail(options: ApiErrorOptions): never {
+  throw apiError(options);
+}
+
+export function asApiError(error: unknown, fallback: ApiErrorFallback = {}): ApiError {
+  if (error instanceof ApiError) {
+    return error;
+  }
+
+  if (error instanceof ZodError) {
+    return apiError({
+      code: fallback.code ?? "API_VALIDATION_FAILED",
+      title: fallback.title ?? "Validation failed",
+      detail:
+        fallback.detail ??
+        error.issues.map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`).join("; "),
+      status: fallback.status ?? 400,
+      category: fallback.category ?? "validation",
+      retryable: fallback.retryable ?? false,
+      fatal: fallback.fatal ?? false,
+      context: fallback.context,
+      cause: getCause(error),
+    });
+  }
+
+  if (error instanceof HTTPException) {
+    return apiError({
+      code: fallback.code ?? `API_HTTP_${error.status}`,
+      title: fallback.title ?? "HTTP exception",
+      detail: fallback.detail ?? error.message,
+      status: fallback.status ?? error.status,
+      category: fallback.category ?? (error.status === 401 ? "authentication" : "external"),
+      retryable: fallback.retryable ?? false,
+      fatal: fallback.fatal ?? false,
+      context: fallback.context,
+      cause: getCause(error),
+    });
+  }
+
+  if (isProblem(error)) {
+    return apiError({
+      code: error.code,
+      title: error.title,
+      detail: error.detail,
+      status: error.status,
+      category: error.category,
+      retryable: error.retryable,
+      fatal: error.fatal,
+      context: error.context,
+      cause: error.cause,
+      type: error.type,
+    });
+  }
+
+  return apiError({
+    code: fallback.code ?? "API_INTERNAL_UNEXPECTED",
+    title: fallback.title ?? "Unexpected API error",
+    detail: fallback.detail ?? (error instanceof Error ? error.message : "Unexpected API error."),
+    status: fallback.status ?? 500,
+    category: fallback.category ?? "internal",
+    retryable: fallback.retryable ?? false,
+    fatal: fallback.fatal ?? false,
+    context: fallback.context,
+    cause: error instanceof Error ? getCause(error) : undefined,
+  });
+}
+
+export function serializeApiError(error: unknown, instance?: string): ApiProblemDetails {
+  return asApiError(error).toProblem(instance);
+}

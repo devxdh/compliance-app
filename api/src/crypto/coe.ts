@@ -1,3 +1,5 @@
+import { fail } from "../errors";
+
 const textEncoder = new TextEncoder();
 
 export interface CoeSignature {
@@ -35,7 +37,15 @@ export async function createEd25519Signer(
 
   if (options.privateKeyPkcs8Base64) {
     if (!options.publicKeySpkiBase64) {
-      throw new Error("publicKeySpkiBase64 is required when privateKeyPkcs8Base64 is provided.");
+      fail({
+        code: "API_COE_PUBLIC_KEY_MISSING",
+        title: "Public key is required",
+        detail: "publicKeySpkiBase64 is required when privateKeyPkcs8Base64 is provided.",
+        status: 500,
+        category: "configuration",
+        retryable: false,
+        fatal: true,
+      });
     }
 
     privateKey = await globalThis.crypto.subtle.importKey(

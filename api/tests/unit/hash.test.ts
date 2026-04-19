@@ -8,7 +8,7 @@ describe("Control Plane Hashing", () => {
   });
 
   it("computes deterministic WORM chain hashes", async () => {
-    const digest = await computeWormHash("GENESIS", { eventType: "USER_VAULTED" });
-    expect(digest).toBe("16efd736c8b552bc17934e1c6ae2bc4f0b4d2b7bab4773a445cfe486b16663c1");
+    const digest = await computeWormHash("GENESIS", { eventType: "USER_VAULTED" }, "vault:req-123");
+    expect(digest).toBe("045388e3f0c1b30c0eb88ff5deed1f66f78450cae0ab7e80da649f8553d74365");
   });
 });

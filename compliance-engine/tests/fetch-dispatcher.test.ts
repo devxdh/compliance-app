@@ -31,7 +31,11 @@ describe("Fetch Dispatcher Integration", () => {
       idempotency_key: "ik-123",
       user_uuid_hash: "hash-456",
       event_type: "USER_VAULTED",
-      payload: { userId: 1 },
+      payload: {
+        request_id: "3dc5c993-2297-4138-906f-f8569d60c611",
+        subject_opaque_id: "usr_1",
+        event_timestamp: "2026-04-19T10:00:00.000Z",
+      },
       previous_hash: "GENESIS",
       current_hash: "abcd",
       status: "pending",
@@ -57,9 +61,15 @@ describe("Fetch Dispatcher Integration", () => {
       authorization: "Bearer secret-token",
     });
     expect(JSON.parse(callArgs![1].body)).toMatchObject({
-      id: "evt-123",
+      idempotency_key: "ik-123",
       event_type: "USER_VAULTED",
-      payload: { userId: 1 },
+      request_id: "3dc5c993-2297-4138-906f-f8569d60c611",
+      subject_opaque_id: "usr_1",
+      payload: {
+        request_id: "3dc5c993-2297-4138-906f-f8569d60c611",
+        subject_opaque_id: "usr_1",
+        event_timestamp: "2026-04-19T10:00:00.000Z",
+      },
     });
   });
 
@@ -81,7 +91,11 @@ describe("Fetch Dispatcher Integration", () => {
         idempotency_key: "ik-123",
         user_uuid_hash: "hash-456",
         event_type: "USER_VAULTED",
-        payload: {},
+        payload: {
+          request_id: "3dc5c993-2297-4138-906f-f8569d60c611",
+          subject_opaque_id: "usr_1",
+          event_timestamp: "2026-04-19T10:00:00.000Z",
+        },
         previous_hash: "GENESIS",
         current_hash: "abcd",
         status: "pending",
@@ -119,7 +133,11 @@ describe("Fetch Dispatcher Integration", () => {
         idempotency_key: "ik-401",
         user_uuid_hash: "hash-401",
         event_type: "USER_VAULTED",
-        payload: {},
+        payload: {
+          request_id: "3dc5c993-2297-4138-906f-f8569d60c611",
+          subject_opaque_id: "usr_1",
+          event_timestamp: "2026-04-19T10:00:00.000Z",
+        },
         previous_hash: "GENESIS",
         current_hash: "abcd",
         status: "pending",

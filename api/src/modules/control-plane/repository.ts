@@ -1,4 +1,10 @@
 import type postgres from "postgres";
+import type {
+  CreateErasureRequestInput,
+  ErasureRequestStatus,
+  ErasureTriggerSource,
+  OutboxEventType,
+} from "./schemas";
 
 export interface ClientRow {
   id: string;
@@ -10,13 +16,18 @@ export interface ClientRow {
 export interface ErasureJobRow {
   id: string;
   client_id: string;
-  client_internal_user_id: string;
-  user_uuid_hash: string;
-  legal_basis: string;
-  retention_years: number;
-  status: "REQUESTED" | "VAULTED" | "NOTICE_SENT" | "SHREDDED" | "FAILED";
-  vault_due_at: Date | null;
-  shred_due_at: Date | null;
+  idempotency_key: string;
+  subject_opaque_id: string;
+  trigger_source: ErasureTriggerSource;
+  actor_opaque_id: string;
+  legal_framework: string;
+  request_timestamp: Date;
+  tenant_id: string | null;
+  cooldown_days: number;
+  shadow_mode: boolean;
+  webhook_url: string | null;
+  status: ErasureRequestStatus;
+  vault_due_at: Date;
   shredded_at: Date | null;
   created_at: Date;
   updated_at: Date;
@@ -40,7 +51,7 @@ export interface TaskQueueRow {
 
 export interface CertificateRow {
   request_id: string;
-  target_hash: string;
+  subject_opaque_id: string;
   method: string;
   legal_framework: string;
   shredded_at: Date;
@@ -62,6 +73,11 @@ export interface AuditLedgerRow {
   previous_hash: string;
   current_hash: string;
   created_at: Date;
+}
+
+interface CreatedJobRecord {
+  job: ErasureJobRow;
+  task: TaskQueueRow;
 }
 
 /**
@@ -94,43 +110,85 @@ export class ControlPlaneRepository {
     return row ?? null;
   }
 
+  async getJobById(jobId: string): Promise<ErasureJobRow | null> {
+    const [job] = await this.sql<ErasureJobRow[]>`
+      SELECT *
+      FROM ${this.sql(this.schema)}.erasure_jobs
+      WHERE id = ${jobId}
+    `;
+    return job ?? null;
+  }
+
+  async getJobByIdempotencyKey(idempotencyKey: string): Promise<ErasureJobRow | null> {
+    const [job] = await this.sql<ErasureJobRow[]>`
+      SELECT *
+      FROM ${this.sql(this.schema)}.erasure_jobs
+      WHERE idempotency_key = ${idempotencyKey}::uuid
+    `;
+    return job ?? null;
+  }
+
+  async getTaskByJobId(jobId: string): Promise<TaskQueueRow | null> {
+    const [task] = await this.sql<TaskQueueRow[]>`
+      SELECT *
+      FROM ${this.sql(this.schema)}.task_queue
+      WHERE erasure_job_id = ${jobId}
+      ORDER BY created_at ASC
+      LIMIT 1
+    `;
+    return task ?? null;
+  }
+
   async createJobAndQueueTask(input: {
     jobId: string;
     taskId: string;
     clientId: string;
-    clientInternalUserId: string;
-    userUuidHash: string;
-    legalBasis: string;
-    retentionYears: number;
+    request: CreateErasureRequestInput;
     payload: Record<string, unknown>;
     now: Date;
-  }) {
-    await this.sql.begin(async (tx) => {
-      await tx`
+  }): Promise<CreatedJobRecord> {
+    return this.sql.begin(async (tx) => {
+      const [job] = await tx<ErasureJobRow[]>`
         INSERT INTO ${tx(this.schema)}.erasure_jobs (
           id,
           client_id,
-          client_internal_user_id,
-          user_uuid_hash,
-          legal_basis,
-          retention_years,
+          idempotency_key,
+          subject_opaque_id,
+          trigger_source,
+          actor_opaque_id,
+          legal_framework,
+          request_timestamp,
+          tenant_id,
+          cooldown_days,
+          shadow_mode,
+          webhook_url,
           status,
+          vault_due_at,
           created_at,
           updated_at
-        ) VALUES (
+        )
+        VALUES (
           ${input.jobId},
           ${input.clientId},
-          ${input.clientInternalUserId},
-          ${input.userUuidHash},
-          ${input.legalBasis},
-          ${input.retentionYears},
-          'REQUESTED',
+          ${input.request.idempotency_key}::uuid,
+          ${input.request.subject_opaque_id},
+          ${input.request.trigger_source},
+          ${input.request.actor_opaque_id},
+          ${input.request.legal_framework},
+          ${new Date(input.request.request_timestamp)},
+          ${input.request.tenant_id ?? null},
+          ${input.request.cooldown_days},
+          ${input.request.shadow_mode},
+          ${input.request.webhook_url ?? null},
+          'WAITING_COOLDOWN',
+          NOW() + MAKE_INTERVAL(days := ${input.request.cooldown_days}),
           ${input.now},
           ${input.now}
         )
+        RETURNING *
       `;
 
-      await tx`
+      const [task] = await tx<TaskQueueRow[]>`
         INSERT INTO ${tx(this.schema)}.task_queue (
           id,
           client_id,
@@ -140,7 +198,8 @@ export class ControlPlaneRepository {
           status,
           created_at,
           updated_at
-        ) VALUES (
+        )
+        VALUES (
           ${input.taskId},
           ${input.clientId},
           ${input.jobId},
@@ -150,21 +209,40 @@ export class ControlPlaneRepository {
           ${input.now},
           ${input.now}
         )
+        RETURNING *
       `;
+
+      return { job: job!, task: task! };
     });
+  }
+
+  async cancelWaitingJobByIdempotencyKey(idempotencyKey: string, now: Date): Promise<ErasureJobRow | null> {
+    const [job] = await this.sql<ErasureJobRow[]>`
+      UPDATE ${this.sql(this.schema)}.erasure_jobs
+      SET status = 'CANCELLED',
+          updated_at = ${now}
+      WHERE idempotency_key = ${idempotencyKey}::uuid
+        AND status = 'WAITING_COOLDOWN'
+      RETURNING *
+    `;
+    return job ?? null;
   }
 
   async claimNextTask(clientId: string, workerClientName: string, now: Date): Promise<TaskQueueRow | null> {
     return this.sql.begin(async (tx) => {
       const [candidate] = await tx<TaskQueueRow[]>`
-        SELECT *
-        FROM ${tx(this.schema)}.task_queue
-        WHERE client_id = ${clientId}
-          AND status IN ('QUEUED', 'DISPATCHED')
-          AND (status = 'QUEUED' OR lease_expires_at IS NULL OR lease_expires_at <= ${now})
-        ORDER BY created_at ASC
+        SELECT tq.*
+        FROM ${tx(this.schema)}.task_queue AS tq
+        JOIN ${tx(this.schema)}.erasure_jobs AS ej
+          ON ej.id = tq.erasure_job_id
+        WHERE tq.client_id = ${clientId}
+          AND tq.status IN ('QUEUED', 'DISPATCHED')
+          AND (tq.status = 'QUEUED' OR tq.lease_expires_at IS NULL OR tq.lease_expires_at <= ${now})
+          AND ej.vault_due_at <= NOW()
+          AND ej.status NOT IN ('CANCELLED', 'SHREDDED')
+        ORDER BY ej.vault_due_at ASC, tq.created_at ASC
         LIMIT 1
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE OF tq, ej SKIP LOCKED
       `;
 
       if (!candidate) {
@@ -181,6 +259,13 @@ export class ControlPlaneRepository {
             updated_at = ${now}
         WHERE id = ${candidate.id}
         RETURNING *
+      `;
+
+      await tx`
+        UPDATE ${tx(this.schema)}.erasure_jobs
+        SET status = CASE WHEN status = 'WAITING_COOLDOWN' THEN 'EXECUTING' ELSE status END,
+            updated_at = ${now}
+        WHERE id = ${candidate.erasure_job_id}
       `;
 
       return leased ?? null;
@@ -205,8 +290,6 @@ export class ControlPlaneRepository {
       }
 
       const nextTaskState = status === "completed" ? "COMPLETED" : "FAILED";
-      const nextJobState = status === "completed" ? "VAULTED" : "FAILED";
-
       const [updated] = await tx<TaskQueueRow[]>`
         UPDATE ${tx(this.schema)}.task_queue
         SET status = ${nextTaskState},
@@ -218,24 +301,17 @@ export class ControlPlaneRepository {
         RETURNING *
       `;
 
-      await tx`
-        UPDATE ${tx(this.schema)}.erasure_jobs
-        SET status = ${nextJobState},
-            updated_at = ${now}
-        WHERE id = ${task.erasure_job_id}
-      `;
+      if (status === "failed") {
+        await tx`
+          UPDATE ${tx(this.schema)}.erasure_jobs
+          SET status = 'FAILED',
+              updated_at = ${now}
+          WHERE id = ${task.erasure_job_id}
+        `;
+      }
 
       return updated ?? null;
     });
-  }
-
-  async getJobById(jobId: string): Promise<ErasureJobRow | null> {
-    const [job] = await this.sql<ErasureJobRow[]>`
-      SELECT *
-      FROM ${this.sql(this.schema)}.erasure_jobs
-      WHERE id = ${jobId}
-    `;
-    return job ?? null;
   }
 
   /**
@@ -255,7 +331,7 @@ export class ControlPlaneRepository {
   async insertAuditLedgerEvent(input: {
     clientId: string;
     idempotencyKey: string;
-    eventType: "USER_VAULTED" | "NOTIFICATION_SENT" | "SHRED_SUCCESS";
+    eventType: OutboxEventType;
     payload: unknown;
     previousHash: string;
     currentHash: string;
@@ -295,13 +371,12 @@ export class ControlPlaneRepository {
       FROM ${this.sql(this.schema)}.audit_ledger
       WHERE worker_idempotency_key = ${idempotencyKey}
     `;
-
     return row ?? null;
   }
 
   async transitionJobFromOutbox(input: {
     jobId: string;
-    eventType: "USER_VAULTED" | "NOTIFICATION_SENT" | "SHRED_SUCCESS";
+    eventType: OutboxEventType;
     now: Date;
     shreddedAt?: Date;
   }) {
@@ -316,7 +391,8 @@ export class ControlPlaneRepository {
       UPDATE ${this.sql(this.schema)}.erasure_jobs
       SET status = ${nextState},
           shredded_at = CASE
-            WHEN ${input.eventType === "SHRED_SUCCESS"} THEN ${input.shreddedAt ?? input.now}
+            WHEN ${input.eventType === "SHRED_SUCCESS" || input.eventType === "USER_HARD_DELETED"}
+              THEN ${input.shreddedAt ?? input.now}
             ELSE shredded_at
           END,
           updated_at = ${input.now}
@@ -326,7 +402,9 @@ export class ControlPlaneRepository {
 
   async insertCertificate(input: {
     requestId: string;
-    targetHash: string;
+    subjectOpaqueId: string;
+    method: string;
+    legalFramework: string;
     shreddedAt: Date;
     payload: Record<string, unknown>;
     signatureBase64: string;
@@ -337,7 +415,7 @@ export class ControlPlaneRepository {
     const rows = await this.sql<{ request_id: string }[]>`
       INSERT INTO ${this.sql(this.schema)}.certificates (
         request_id,
-        target_hash,
+        subject_opaque_id,
         method,
         legal_framework,
         shredded_at,
@@ -348,9 +426,9 @@ export class ControlPlaneRepository {
         algorithm
       ) VALUES (
         ${input.requestId},
-        ${input.targetHash},
-        'CRYPTO_SHREDDING_DEK_DELETE',
-        'DPDP_SEC_8_7',
+        ${input.subjectOpaqueId},
+        ${input.method},
+        ${input.legalFramework},
         ${input.shreddedAt},
         ${this.sql.json(input.payload as postgres.JSONValue)},
         ${input.signatureBase64},

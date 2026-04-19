@@ -77,8 +77,13 @@ database:
   app_schema: tenant_app
   engine_schema: tenant_engine
 compliance_policy:
-  retention_years: null
+  default_retention_years: null
   notice_window_hours: 48
+  retention_rules:
+    - rule_name: RBI_KYC
+      if_has_data_in:
+        - kyc_documents
+      retention_years: 5
 graph:
   root_table: users
   root_id_column: id
@@ -113,7 +118,7 @@ integrity:
         },
         nullRetentionPath
       )
-    ).toThrow(/retention_years/i);
+    ).toThrow(/default_retention_years/i);
 
     const injectionPath = await writeTempYaml(`
 version: "1.0"
@@ -121,8 +126,13 @@ database:
   app_schema: tenant_app
   engine_schema: tenant_engine
 compliance_policy:
-  retention_years: 5
+  default_retention_years: 0
   notice_window_hours: 48
+  retention_rules:
+    - rule_name: RBI_KYC
+      if_has_data_in:
+        - kyc_documents
+      retention_years: 5
 graph:
   root_table: "users; DROP TABLE clients;--"
   root_id_column: id

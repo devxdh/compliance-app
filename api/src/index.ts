@@ -23,6 +23,7 @@ const app = createApp({
   controlSchema: env.API_CONTROL_SCHEMA,
   signer,
   workerSharedSecret: env.WORKER_SHARED_SECRET,
+  workerClientName: env.WORKER_CLIENT_NAME,
   maxOutboxPayloadBytes: env.MAX_OUTBOX_PAYLOAD_BYTES,
   taskLeaseSeconds: env.WORKER_TASK_LEASE_SECONDS,
 });

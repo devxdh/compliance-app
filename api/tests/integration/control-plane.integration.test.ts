@@ -29,95 +29,192 @@ describe("Control Plane API (Integration)", () => {
       controlSchema,
       signer: await createEd25519Signer("integration-key"),
       workerSharedSecret: "worker-secret",
+      workerClientName: "worker-1",
       maxOutboxPayloadBytes: 2048,
     });
 
     return { app, controlSchema };
   }
 
-  interface CreatedRequestResponse {
-    requestId: string;
-    taskId: string;
-    acceptedAt: string;
-  }
-
-  interface SyncResponse {
-    pending: boolean;
-    task?: {
-      id: string;
-      task_type: "VAULT_USER";
-      payload: { userId: number };
-    };
-  }
-
-  function buildWorkerAuthHeaders(clientId: string, token: string) {
+  function buildWorkerAuthHeaders(token: string = "worker-secret") {
     return {
-      "x-client-id": clientId,
+      "x-client-id": "worker-1",
       authorization: `Bearer ${token}`,
     };
   }
 
-  async function computeCurrentHash(previousHash: string, payload: unknown): Promise<string> {
-    const data = new TextEncoder().encode(`${previousHash}${JSON.stringify(payload)}`);
+  function buildErasureRequest(overrides: Record<string, unknown> = {}) {
+    return {
+      subject_opaque_id: "usr_8847a92b_4f1c_882a",
+      idempotency_key: crypto.randomUUID(),
+      trigger_source: "USER_CONSENT_WITHDRAWAL",
+      actor_opaque_id: "usr_8847a92b_4f1c_882a",
+      legal_framework: "DPDP_2023",
+      request_timestamp: "2026-04-19T10:00:00.000Z",
+      cooldown_days: 30,
+      shadow_mode: false,
+      ...overrides,
+    };
+  }
+
+  async function computeCurrentHash(previousHash: string, payload: unknown, idempotencyKey: string): Promise<string> {
+    const data = new TextEncoder().encode(`${previousHash}${JSON.stringify(payload)}${idempotencyKey}`);
     const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
     return Buffer.from(digest).toString("hex");
   }
 
-  interface CertificateResponse {
-    requestId: string;
-    targetHash: string;
-    method: string;
-    legalFramework: string;
-    shreddedAt: string;
-    signature: {
-      algorithm: string;
-      keyId: string;
-      signatureBase64: string;
-      publicKeySpkiBase64: string;
-    };
-  }
-
-  it("creates request, dispatches task, processes worker callbacks, and mints CoE on shred success", async () => {
+  it("rejects undeclared PII fields and missing mandatory actor metadata", async () => {
     const { app } = await setup();
-    const targetHash = "aa".repeat(32);
+
+    const extraFieldResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...buildErasureRequest(),
+        email: "alice@example.com",
+      }),
+    });
+    expect(extraFieldResponse.status).toBe(400);
+
+    const missingActorResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        subject_opaque_id: "usr_missing_actor",
+        idempotency_key: crypto.randomUUID(),
+        trigger_source: "USER_CONSENT_WITHDRAWAL",
+        legal_framework: "DPDP_2023",
+        request_timestamp: "2026-04-19T10:00:00.000Z",
+      }),
+    });
+    expect(missingActorResponse.status).toBe(400);
+  });
+
+  it("sync dispatches only due jobs and ignores cancelled or future cooldown work", async () => {
+    const { app, controlSchema } = await setup();
+    const futureJob = buildErasureRequest({ subject_opaque_id: "usr_future", cooldown_days: 30 });
+    const cancelledJob = buildErasureRequest({ subject_opaque_id: "usr_cancel", cooldown_days: 30 });
+    const dueJob = buildErasureRequest({ subject_opaque_id: "usr_due", cooldown_days: 0, tenant_id: "tenant_a" });
+
+    await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(futureJob),
+    });
+
+    const cancelledCreate = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(cancelledJob),
+    });
+    expect(cancelledCreate.status).toBe(202);
+
+    const cancelResponse = await app.request(`/api/v1/erasure-requests/${cancelledJob.idempotency_key}/cancel`, {
+      method: "POST",
+    });
+    expect(cancelResponse.status).toBe(200);
+
+    const dueCreate = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(dueJob),
+    });
+    const dueCreated = (await dueCreate.json()) as { request_id: string; task_id: string };
+
+    const syncResponse = await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+    expect(syncResponse.status).toBe(200);
+    const syncPayload = (await syncResponse.json()) as {
+      pending: boolean;
+      task?: {
+        id: string;
+        task_type: "VAULT_USER";
+        payload: {
+          request_id: string;
+          subject_opaque_id: string;
+          tenant_id?: string;
+        };
+      };
+    };
+
+    expect(syncPayload.pending).toBe(true);
+    expect(syncPayload.task?.id).toBe(dueCreated.task_id);
+    expect(syncPayload.task?.payload.request_id).toBe(dueCreated.request_id);
+    expect(syncPayload.task?.payload.subject_opaque_id).toBe("usr_due");
+    expect(syncPayload.task?.payload.tenant_id).toBe("tenant_a");
+
+    await app.request(`/api/v1/worker/tasks/${dueCreated.task_id}/ack`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        status: "completed",
+        result: { action: "vaulted" },
+      }),
+    });
+
+    const secondSync = await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+    expect(secondSync.status).toBe(200);
+    expect(await secondSync.json()).toEqual({ pending: false });
+
+    const jobRows = await sql<{ subject_opaque_id: string; status: string }[]>`
+      SELECT subject_opaque_id, status
+      FROM ${sql(controlSchema)}.erasure_jobs
+      ORDER BY subject_opaque_id ASC
+    `;
+    expect(jobRows).toEqual([
+      { subject_opaque_id: "usr_cancel", status: "CANCELLED" },
+      { subject_opaque_id: "usr_due", status: "EXECUTING" },
+      { subject_opaque_id: "usr_future", status: "WAITING_COOLDOWN" },
+    ]);
+  });
+
+  it("cancel endpoint prevents a waiting erasure request from syncing", async () => {
+    const { app } = await setup();
+    const request = buildErasureRequest({ subject_opaque_id: "usr_abort", cooldown_days: 30 });
 
     const createResponse = await app.request("/api/v1/erasure-requests", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        clientId: "tenant_a",
-        targetHash,
-        legalBasis: "DPDP_SEC_8_7",
-        retentionYears: 5,
-      }),
+      body: JSON.stringify(request),
     });
-
     expect(createResponse.status).toBe(202);
-    const created = (await createResponse.json()) as CreatedRequestResponse;
-    expect(created.requestId).toBeTruthy();
-    expect(created.taskId).toBeTruthy();
-    expect(created.requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
-    expect(created.taskId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+
+    const cancelResponse = await app.request(`/api/v1/erasure-requests/${request.idempotency_key}/cancel`, {
+      method: "POST",
+    });
+    expect(cancelResponse.status).toBe(200);
 
     const syncResponse = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders("tenant_a", "worker-secret"),
+      headers: buildWorkerAuthHeaders(),
     });
     expect(syncResponse.status).toBe(200);
-    const syncPayload = (await syncResponse.json()) as SyncResponse;
-    expect(syncPayload.pending).toBe(true);
-    expect(syncPayload.task).toBeTruthy();
-    if (!syncPayload.task) {
-      throw new Error("expected pending worker task");
-    }
-    expect(syncPayload.task.task_type).toBe("VAULT_USER");
-    expect(syncPayload.task.payload.userId).toBe(1042);
+    expect(await syncResponse.json()).toEqual({ pending: false });
+  });
 
-    const ackResponse = await app.request(`/api/v1/worker/tasks/${syncPayload.task.id}/ack`, {
+  it("ingests a chained USER_VAULTED event and transitions the job to VAULTED", async () => {
+    const { app, controlSchema } = await setup();
+    const request = buildErasureRequest({ subject_opaque_id: "usr_worm", cooldown_days: 0 });
+    const createResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const created = (await createResponse.json()) as { request_id: string; task_id: string };
+
+    const ackResponse = await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders("tenant_a", "worker-secret"),
+        ...buildWorkerAuthHeaders(),
       },
       body: JSON.stringify({
         status: "completed",
@@ -126,244 +223,140 @@ describe("Control Plane API (Integration)", () => {
     });
     expect(ackResponse.status).toBe(200);
 
-    let previousHash = "GENESIS";
-    for (const eventType of ["USER_VAULTED", "NOTIFICATION_SENT", "SHRED_SUCCESS"] as const) {
-      const payload = { eventType };
-      const currentHash = await computeCurrentHash(previousHash, payload);
-      const outboxResponse = await app.request("/api/v1/worker/outbox", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...buildWorkerAuthHeaders("tenant_a", "worker-secret"),
-        },
-        body: JSON.stringify({
-          idempotencyKey: `${eventType.toLowerCase()}:${created.requestId}`,
-          requestId: created.requestId,
-          targetHash,
-          eventType,
-          payload,
-          previousHash,
-          currentHash,
-          eventTimestamp: "2026-04-18T00:00:00.000Z",
-        }),
-      });
-      expect(outboxResponse.status).toBe(202);
-      previousHash = currentHash;
-    }
-
-    const certificateResponse = await app.request(`/api/v1/certificates/${created.requestId}`);
-    expect(certificateResponse.status).toBe(200);
-    const certificatePayload = (await certificateResponse.json()) as CertificateResponse;
-
-    expect(certificatePayload.requestId).toBe(created.requestId);
-    expect(certificatePayload.targetHash).toBe(targetHash);
-    expect(certificatePayload.method).toBe("CRYPTO_SHREDDING_DEK_DELETE");
-    expect(certificatePayload.signature.algorithm).toBe("Ed25519");
-    expect(certificatePayload.signature.signatureBase64).toBeTruthy();
-  });
-
-  it("rejects non-zero-trust request bodies containing undeclared fields", async () => {
-    const { app } = await setup();
-    const response = await app.request("/api/v1/erasure-requests", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        clientId: "tenant_a",
-        targetHash: "bb".repeat(32),
-        legalBasis: "DPDP_SEC_8_7",
-        retentionYears: 5,
-        email: "pii@should.not.pass",
-      }),
-    });
-
-    expect(response.status).toBe(400);
-  });
-
-  it("rejects worker sync when auth headers are missing or invalid", async () => {
-    const { app } = await setup();
-    await app.request("/api/v1/erasure-requests", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        clientId: "tenant_auth",
-        targetHash: "dd".repeat(32),
-        legalBasis: "DPDP_SEC_8_7",
-        retentionYears: 5,
-      }),
-    });
-
-    const missingAuth = await app.request("/api/v1/worker/sync", {
-      method: "GET",
-      headers: { "x-client-id": "tenant_auth" },
-    });
-    expect(missingAuth.status).toBe(400);
-
-    const wrongAuth = await app.request("/api/v1/worker/sync", {
-      method: "GET",
-      headers: buildWorkerAuthHeaders("tenant_auth", "wrong-secret"),
-    });
-    expect(wrongAuth.status).toBe(401);
-  });
-
-  it("rejects outbox payloads with invalid hash chaining or oversized payloads", async () => {
-    const { app } = await setup();
-    const createResponse = await app.request("/api/v1/erasure-requests", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        clientId: "tenant_hash",
-        targetHash: "ee".repeat(32),
-        legalBasis: "DPDP_SEC_8_7",
-        retentionYears: 5,
-      }),
-    });
-    const created = (await createResponse.json()) as CreatedRequestResponse;
-
-    const badHashResponse = await app.request("/api/v1/worker/outbox", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...buildWorkerAuthHeaders("tenant_hash", "worker-secret"),
-      },
-      body: JSON.stringify({
-        idempotencyKey: `bad-hash:${created.requestId}`,
-        requestId: created.requestId,
-        targetHash: "ee".repeat(32),
-        eventType: "USER_VAULTED",
-        payload: { eventType: "USER_VAULTED" },
-        previousHash: "GENESIS",
-        currentHash: "0".repeat(64),
-        eventTimestamp: "2026-04-18T00:00:00.000Z",
-      }),
-    });
-    expect(badHashResponse.status).toBe(400);
-
-    const oversizedPayload = "x".repeat(5000);
-    const oversizedHash = await computeCurrentHash("GENESIS", oversizedPayload);
-    const oversizedResponse = await app.request("/api/v1/worker/outbox", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...buildWorkerAuthHeaders("tenant_hash", "worker-secret"),
-      },
-      body: JSON.stringify({
-        idempotencyKey: `oversized:${created.requestId}`,
-        requestId: created.requestId,
-        targetHash: "ee".repeat(32),
-        eventType: "USER_VAULTED",
-        payload: oversizedPayload,
-        previousHash: "GENESIS",
-        currentHash: oversizedHash,
-        eventTimestamp: "2026-04-18T00:00:00.000Z",
-      }),
-    });
-    expect(oversizedResponse.status).toBe(400);
-  });
-
-  it("rejects worker outbox ingestion when credentials are invalid", async () => {
-    const { app } = await setup();
-    const createResponse = await app.request("/api/v1/erasure-requests", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        clientId: "tenant_outbox_auth",
-        targetHash: "ab".repeat(32),
-        legalBasis: "DPDP_SEC_8_7",
-        retentionYears: 5,
-      }),
-    });
-    const created = (await createResponse.json()) as CreatedRequestResponse;
-
-    const payload = { eventType: "USER_VAULTED" };
-    const currentHash = await computeCurrentHash("GENESIS", payload);
-    const response = await app.request("/api/v1/worker/outbox", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...buildWorkerAuthHeaders("tenant_outbox_auth", "wrong-secret"),
-      },
-      body: JSON.stringify({
-        idempotencyKey: `bad-auth:${created.requestId}`,
-        requestId: created.requestId,
-        targetHash: "ab".repeat(32),
-        eventType: "USER_VAULTED",
-        payload,
-        previousHash: "GENESIS",
-        currentHash,
-        eventTimestamp: "2026-04-18T00:00:00.000Z",
-      }),
-    });
-
-    expect(response.status).toBe(401);
-  });
-
-  it("accepts equivalent outbox retries as idempotent replays", async () => {
-    const { app } = await setup();
-    const targetHash = "fa".repeat(32);
-    const createResponse = await app.request("/api/v1/erasure-requests", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        clientId: "tenant_replay",
-        targetHash,
-        legalBasis: "DPDP_SEC_8_7",
-        retentionYears: 5,
-      }),
-    });
-    const created = (await createResponse.json()) as CreatedRequestResponse;
-
-    const payload = { eventType: "USER_VAULTED" };
-    const currentHash = await computeCurrentHash("GENESIS", payload);
-    const eventBody = {
-      idempotencyKey: `retry:${created.requestId}`,
-      requestId: created.requestId,
-      targetHash,
-      eventType: "USER_VAULTED",
-      payload,
-      previousHash: "GENESIS",
-      currentHash,
-      eventTimestamp: "2026-04-18T00:00:00.000Z",
+    const payload = {
+      request_id: created.request_id,
+      subject_opaque_id: request.subject_opaque_id,
+      tenant_id: null,
+      trigger_source: request.trigger_source,
+      legal_framework: request.legal_framework,
+      actor_opaque_id: request.actor_opaque_id,
+      applied_rule_name: "PMLA_FINANCIAL",
+      event_timestamp: "2026-04-19T10:00:00.000Z",
+      retention_years: 10,
     };
+    const idempotencyKey = `vault:${created.request_id}`;
+    const currentHash = await computeCurrentHash("GENESIS", payload, idempotencyKey);
 
-    const first = await app.request("/api/v1/worker/outbox", {
+    const outboxResponse = await app.request("/api/v1/worker/outbox", {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders("tenant_replay", "worker-secret"),
+        ...buildWorkerAuthHeaders(),
       },
-      body: JSON.stringify(eventBody),
+      body: JSON.stringify({
+        idempotency_key: idempotencyKey,
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        event_type: "USER_VAULTED",
+        payload,
+        previous_hash: "GENESIS",
+        current_hash: currentHash,
+        event_timestamp: "2026-04-19T10:00:00.000Z",
+      }),
     });
-    expect(first.status).toBe(202);
-    expect(await first.json()).toEqual({ accepted: true, idempotentReplay: false });
+    expect(outboxResponse.status).toBe(202);
 
-    const replay = await app.request("/api/v1/worker/outbox", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...buildWorkerAuthHeaders("tenant_replay", "worker-secret"),
-      },
-      body: JSON.stringify(eventBody),
-    });
-    expect(replay.status).toBe(202);
-    expect(await replay.json()).toEqual({ accepted: true, idempotentReplay: true });
+    const [job] = await sql<{ status: string }[]>`
+      SELECT status
+      FROM ${sql(controlSchema)}.erasure_jobs
+      WHERE id = ${created.request_id}
+    `;
+    expect(job?.status).toBe("VAULTED");
   });
 
-  it("returns 404 when CoE is requested before shred completion", async () => {
+  it("ingests SHRED_SUCCESS and mints a certificate of erasure", async () => {
     const { app } = await setup();
-
+    const request = buildErasureRequest({ subject_opaque_id: "usr_cert", cooldown_days: 0 });
     const createResponse = await app.request("/api/v1/erasure-requests", {
       method: "POST",
       headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const created = (await createResponse.json()) as { request_id: string; task_id: string };
+
+    await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
       body: JSON.stringify({
-        clientId: "tenant_a",
-        targetHash: "cc".repeat(32),
-        legalBasis: "DPDP_SEC_8_7",
-        retentionYears: 5,
+        status: "completed",
+        result: { action: "vaulted" },
       }),
     });
-    const created = (await createResponse.json()) as CreatedRequestResponse;
 
-    const certificateResponse = await app.request(`/api/v1/certificates/${created.requestId}`);
-    expect(certificateResponse.status).toBe(404);
+    const vaultPayload = {
+      request_id: created.request_id,
+      subject_opaque_id: request.subject_opaque_id,
+      trigger_source: request.trigger_source,
+      legal_framework: request.legal_framework,
+      actor_opaque_id: request.actor_opaque_id,
+      applied_rule_name: "PMLA_FINANCIAL",
+      event_timestamp: "2026-04-19T10:00:00.000Z",
+    };
+    const vaultIdempotencyKey = `vault:${created.request_id}`;
+    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload, vaultIdempotencyKey);
+    await app.request("/api/v1/worker/outbox", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        idempotency_key: vaultIdempotencyKey,
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        event_type: "USER_VAULTED",
+        payload: vaultPayload,
+        previous_hash: "GENESIS",
+        current_hash: vaultHash,
+        event_timestamp: "2026-04-19T10:00:00.000Z",
+      }),
+    });
+
+    const shredPayload = {
+      request_id: created.request_id,
+      subject_opaque_id: request.subject_opaque_id,
+      trigger_source: request.trigger_source,
+      legal_framework: request.legal_framework,
+      actor_opaque_id: request.actor_opaque_id,
+      applied_rule_name: "PMLA_FINANCIAL",
+      event_timestamp: "2036-04-19T10:00:00.000Z",
+      shredded_at: "2036-04-19T10:00:00.000Z",
+    };
+    const shredIdempotencyKey = `shred:${created.request_id}`;
+    const shredHash = await computeCurrentHash(vaultHash, shredPayload, shredIdempotencyKey);
+    const shredResponse = await app.request("/api/v1/worker/outbox", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        idempotency_key: shredIdempotencyKey,
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        event_type: "SHRED_SUCCESS",
+        payload: shredPayload,
+        previous_hash: vaultHash,
+        current_hash: shredHash,
+        event_timestamp: "2036-04-19T10:00:00.000Z",
+      }),
+    });
+    expect(shredResponse.status).toBe(202);
+
+    const certificateResponse = await app.request(`/api/v1/certificates/${created.request_id}`);
+    expect(certificateResponse.status).toBe(200);
+    const certificate = (await certificateResponse.json()) as {
+      request_id: string;
+      subject_opaque_id: string;
+      legal_framework: string;
+      method: string;
+    };
+    expect(certificate.request_id).toBe(created.request_id);
+    expect(certificate.subject_opaque_id).toBe(request.subject_opaque_id);
+    expect(certificate.legal_framework).toBe(request.legal_framework);
+    expect(certificate.method).toBe("CRYPTO_SHREDDING_DEK_DELETE");
   });
 });

@@ -92,6 +92,38 @@ const satelliteTargetSchema = z
 
 export type SatelliteTarget = z.infer<typeof satelliteTargetSchema>;
 
+const retentionRuleSchema = z
+  .object({
+    rule_name: z.string().min(1),
+    if_has_data_in: z.array(z.string().min(1)),
+    retention_years: z.number().int().min(0),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.if_has_data_in.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "retention rule must reference at least one evidence table.",
+        path: ["if_has_data_in"],
+      });
+      return;
+    }
+
+    for (const table of value.if_has_data_in) {
+      try {
+        assertIdentifier(table, "retention rule evidence table");
+      } catch (error) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: error instanceof Error ? error.message : "Invalid retention rule evidence table.",
+          path: ["if_has_data_in"],
+        });
+      }
+    }
+  });
+
+export type RetentionRule = z.infer<typeof retentionRuleSchema>;
+
 const workerYamlSchema = z
   .object({
     version: z.string().min(1),
@@ -104,8 +136,9 @@ const workerYamlSchema = z
       .strict(),
     compliance_policy: z
       .object({
-        retention_years: z.number().int().min(1),
+        default_retention_years: z.number().int().min(0),
         notice_window_hours: z.number().int().min(1),
+        retention_rules: z.array(retentionRuleSchema),
       })
       .strict(),
     graph: z
@@ -257,6 +290,15 @@ function normalizeWorkerYaml(config: WorkerYamlConfig): WorkerYamlConfig {
           )
         : undefined,
     })),
+    compliance_policy: {
+      ...config.compliance_policy,
+      retention_rules: config.compliance_policy.retention_rules.map((rule) => ({
+        ...rule,
+        if_has_data_in: rule.if_has_data_in.map((table) =>
+          assertIdentifier(table, "retention rule evidence table")
+        ),
+      })),
+    },
   };
 }
 

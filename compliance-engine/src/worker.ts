@@ -16,7 +16,18 @@ import { getLogger, logError } from "./observability/logger";
 const logger = getLogger({ component: "worker" });
 
 export interface WorkerTaskPayload {
-  userId: number;
+  request_id?: string;
+  subject_opaque_id?: string;
+  idempotency_key?: string;
+  trigger_source?: "USER_CONSENT_WITHDRAWAL" | "PURPOSE_FULFILLED" | "ADMIN_PURGE";
+  actor_opaque_id?: string;
+  legal_framework?: string;
+  request_timestamp?: string;
+  tenant_id?: string;
+  cooldown_days?: number;
+  shadow_mode?: boolean;
+  webhook_url?: string;
+  userId?: number;
   now?: string;
   shadowMode?: boolean;
 }
@@ -53,6 +64,26 @@ export interface ComplianceWorkerOptions {
   config: WorkerConfig;
   apiClient: ApiClient;
   mailer: MockMailer;
+}
+
+function resolveNumericTaskSubject(task: WorkerTask): number {
+  if (typeof task.payload.userId === "number" && Number.isInteger(task.payload.userId) && task.payload.userId > 0) {
+    return task.payload.userId;
+  }
+
+  const parsed = Number(task.payload.subject_opaque_id);
+  if (Number.isInteger(parsed) && parsed > 0) {
+    return parsed;
+  }
+
+  fail({
+    code: "DPDP_TASK_PAYLOAD_INVALID",
+    title: "Invalid task payload",
+    detail: `Task ${task.id} requires a numeric user identifier for ${task.task_type}.`,
+    category: "validation",
+    retryable: false,
+    context: { taskId: task.id, taskType: task.task_type },
+  });
 }
 
 async function acknowledgeTask(
@@ -100,23 +131,36 @@ export class ComplianceWorker {
   private async executeTask(task: WorkerTask, now: Date): Promise<TaskExecutionResult> {
     switch (task.task_type) {
       case "VAULT_USER":
-        return vaultUser(this.sql, task.payload.userId, this.secrets, {
+        return vaultUser(
+          this.sql,
+          task.payload.subject_opaque_id ?? task.payload.userId ?? "",
+          this.secrets,
+          {
           appSchema: this.config.database.app_schema,
           engineSchema: this.config.database.engine_schema,
-          retentionYears: this.config.compliance_policy.retention_years,
+          defaultRetentionYears: this.config.compliance_policy.default_retention_years,
           noticeWindowHours: this.config.compliance_policy.notice_window_hours,
           graphMaxDepth: this.config.graph.max_depth,
           rootTable: this.config.graph.root_table,
           rootIdColumn: this.config.graph.root_id_column,
           rootPiiColumns: this.config.graph.root_pii_columns,
           satelliteTargets: this.config.satellite_targets,
-          shadowMode: task.payload.shadowMode,
+          retentionRules: this.config.compliance_policy.retention_rules,
+          tenantId: task.payload.tenant_id,
+          requestId: task.payload.request_id,
+          subjectOpaqueId: task.payload.subject_opaque_id,
+          triggerSource: task.payload.trigger_source,
+          actorOpaqueId: task.payload.actor_opaque_id,
+          legalFramework: task.payload.legal_framework,
+          requestTimestamp: task.payload.request_timestamp,
+          shadowMode: task.payload.shadow_mode ?? task.payload.shadowMode,
           sqlReplica: this.sqlReplica,
           now,
-        });
+          }
+        );
 
       case "NOTIFY_USER":
-        return dispatchPreErasureNotice(this.sql, task.payload.userId, this.secrets, this.mailer, {
+        return dispatchPreErasureNotice(this.sql, resolveNumericTaskSubject(task), this.secrets, this.mailer, {
           appSchema: this.config.database.app_schema,
           engineSchema: this.config.database.engine_schema,
           rootTable: this.config.graph.root_table,
@@ -125,7 +169,7 @@ export class ComplianceWorker {
         });
 
       case "SHRED_USER":
-        return shredUser(this.sql, task.payload.userId, {
+        return shredUser(this.sql, resolveNumericTaskSubject(task), {
           appSchema: this.config.database.app_schema,
           engineSchema: this.config.database.engine_schema,
           rootTable: this.config.graph.root_table,

@@ -59,8 +59,9 @@ describe("Compliance Worker Daemon (E2E Lifecycle)", () => {
           engine_schema: engineSchema,
         },
         compliance_policy: {
-          retention_years: 5,
+          default_retention_years: 5,
           notice_window_hours: 48,
+          retention_rules: [],
         },
         graph: {
           root_table: "users",
@@ -97,7 +98,22 @@ describe("Compliance Worker Daemon (E2E Lifecycle)", () => {
     // Simulate the API giving us a VAULT_USER task
     mockApi.syncTask.mockResolvedValueOnce({
       pending: true,
-      task: { id: "task-1", task_type: "VAULT_USER", payload: { userId } },
+      task: {
+        id: "task-1",
+        task_type: "VAULT_USER",
+        payload: {
+          request_id: crypto.randomUUID(),
+          subject_opaque_id: userId.toString(),
+          idempotency_key: crypto.randomUUID(),
+          trigger_source: "USER_CONSENT_WITHDRAWAL",
+          actor_opaque_id: userId.toString(),
+          legal_framework: "DPDP_2023",
+          request_timestamp: new Date().toISOString(),
+          cooldown_days: 0,
+          shadow_mode: false,
+          userId,
+        },
+      },
     });
     mockApi.ackTask.mockResolvedValueOnce(true);
     mockApi.pushOutboxEvent.mockResolvedValueOnce(true);

@@ -1,5 +1,5 @@
 import type postgres from "postgres";
-import type { RootPiiColumns, SatelliteTarget } from "../config/worker";
+import type { RetentionRule, RootPiiColumns, SatelliteTarget } from "../config/worker";
 
 export interface WorkerSecrets {
   kek: Uint8Array;
@@ -13,7 +13,7 @@ export interface WorkerSchemas {
 
 export interface WorkerTimingOptions {
   now?: Date;
-  retentionYears?: number;
+  defaultRetentionYears?: number;
   noticeWindowHours?: number;
   graphMaxDepth?: number;
   dryRun?: boolean;
@@ -32,6 +32,14 @@ export interface VaultUserOptions extends WorkerSchemas, WorkerTimingOptions {
   rootIdColumn?: string;
   rootPiiColumns?: RootPiiColumns;
   satelliteTargets?: SatelliteTarget[];
+  retentionRules?: readonly RetentionRule[];
+  tenantId?: string;
+  requestId?: string;
+  subjectOpaqueId?: string;
+  triggerSource?: string;
+  actorOpaqueId?: string;
+  legalFramework?: string;
+  requestTimestamp?: string;
   shadowMode?: boolean;
   sqlReplica?: postgres.Sql;
 }
@@ -59,6 +67,8 @@ export interface VaultUserResult extends WorkerOperationResult {
     | "already_hard_deleted"
     | "dry_run";
   dependencyCount: number;
+  retentionYears: number | null;
+  appliedRuleName: string | null;
   retentionExpiry: string | null;
   notificationDueAt: string | null;
   pseudonym: string | null;

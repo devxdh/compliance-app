@@ -51,7 +51,9 @@ function resolveNotificationLeaseSeconds(value?: number): number {
 }
 
 function buildNotificationIdempotencyKey(vault: VaultRecord): string {
-  return `notice:${vault.root_schema}:${vault.root_table}:${vault.root_id}:${vault.notification_due_at.toISOString()}`;
+  return vault.request_id
+    ? `notice:${vault.request_id}:${vault.notification_due_at.toISOString()}`
+    : `notice:${vault.root_schema}:${vault.root_table}:${vault.root_id}:${vault.notification_due_at.toISOString()}`;
 }
 
 function buildNoticeDryRunPlan(
@@ -366,12 +368,20 @@ export async function dispatchPreErasureNotice(
         reservation.vault.user_uuid_hash,
         "NOTIFICATION_SENT",
         {
-          rootSchema: appSchema,
-          rootTable,
-          rootId: userId.toString(),
-          sentAt: now.toISOString(),
+          request_id: reservation.vault.request_id,
+          subject_opaque_id: reservation.vault.root_id,
+          tenant_id: reservation.vault.tenant_id || null,
+          trigger_source: reservation.vault.trigger_source,
+          legal_framework: reservation.vault.legal_framework,
+          actor_opaque_id: reservation.vault.actor_opaque_id,
+          applied_rule_name: reservation.vault.applied_rule_name,
+          event_timestamp: now.toISOString(),
+          root_schema: appSchema,
+          root_table: rootTable,
+          root_id: userId.toString(),
+          sent_at: now.toISOString(),
         },
-        `notice:${appSchema}:${rootTable}:${userId}`,
+        reservation.vault.request_id ? `notice:${reservation.vault.request_id}` : `notice:${appSchema}:${rootTable}:${userId}`,
         now
       );
     });

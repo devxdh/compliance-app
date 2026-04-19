@@ -44,8 +44,8 @@ describe("WorkerError normalization", () => {
     let validationError: ZodError | null = null;
 
     try {
-      z.object({ retention_years: z.number().int().min(1) }).parse({
-        retention_years: null,
+      z.object({ default_retention_years: z.number().int().min(0) }).parse({
+        default_retention_years: null,
       });
     } catch (error) {
       validationError = error as ZodError;
@@ -55,7 +55,7 @@ describe("WorkerError normalization", () => {
 
     expect(normalized.code).toBe("DPDP_VALIDATION_FAILED");
     expect(normalized.category).toBe("validation");
-    expect(normalized.detail).toContain("retention_years");
+    expect(normalized.detail).toContain("default_retention_years");
     expect(normalized.retryable).toBe(false);
   });
 });

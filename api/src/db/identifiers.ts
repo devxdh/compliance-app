@@ -1,3 +1,5 @@
+import { fail } from "../errors";
+
 const IDENTIFIER_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
 /**
@@ -5,9 +7,15 @@ const IDENTIFIER_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
  */
 export function assertIdentifier(name: string, label: string): string {
   if (!IDENTIFIER_PATTERN.test(name)) {
-    throw new Error(`Invalid ${label}: "${name}". Only letters, numbers, and underscores are allowed.`);
+    fail({
+      code: "API_IDENTIFIER_INVALID",
+      title: "Invalid SQL identifier",
+      detail: `Invalid ${label}: "${name}". Only letters, numbers, and underscores are allowed.`,
+      status: 400,
+      category: "validation",
+      retryable: false,
+    });
   }
 
   return name;
 }
-

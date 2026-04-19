@@ -4,8 +4,18 @@ database:
   engine_schema: "dpdp_engine"
 
 compliance_policy:
-  retention_years: 5
+  default_retention_years: 0
   notice_window_hours: 48
+  retention_rules:
+    - rule_name: "PMLA_FINANCIAL"
+      if_has_data_in:
+        - "transactions"
+        - "invoices"
+      retention_years: 10
+    - rule_name: "RBI_KYC"
+      if_has_data_in:
+        - "kyc_documents"
+      retention_years: 5
 
 graph:
   root_table: "users"

@@ -43,6 +43,13 @@ export interface FetchDispatcherOptions {
   timeoutMs?: number;
 }
 
+interface ControlPlaneOutboxPayload {
+  request_id?: string | null;
+  subject_opaque_id?: string | null;
+  event_timestamp?: string | null;
+  [key: string]: unknown;
+}
+
 const DEFAULT_ENGINE_SCHEMA = "dpdp_engine";
 const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_LEASE_SECONDS = 60;
@@ -81,9 +88,48 @@ export async function sendToAPI(event: OutboxEvent): Promise<boolean> {
 export function createFetchDispatcher(options: FetchDispatcherOptions) {
   const timeoutMs = options.timeoutMs ?? 10_000;
 
+  function buildControlPlaneRequestBody(event: OutboxEvent) {
+    if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
+      fail({
+        code: "DPDP_OUTBOX_PAYLOAD_INVALID",
+        title: "Invalid outbox payload",
+        detail: `Outbox payload for event ${event.id} must be an object.`,
+        category: "integrity",
+        retryable: false,
+        fatal: true,
+        context: { eventId: event.id },
+      });
+    }
+
+    const payload = event.payload as ControlPlaneOutboxPayload;
+    if (!payload.request_id || !payload.subject_opaque_id || !payload.event_timestamp) {
+      fail({
+        code: "DPDP_OUTBOX_PROTOCOL_REJECTED",
+        title: "Outbox payload missing control-plane envelope",
+        detail: `Outbox event ${event.id} is missing request_id, subject_opaque_id, or event_timestamp.`,
+        category: "integrity",
+        retryable: false,
+        fatal: true,
+        context: { eventId: event.id },
+      });
+    }
+
+    return {
+      idempotency_key: event.idempotency_key,
+      request_id: payload.request_id,
+      subject_opaque_id: payload.subject_opaque_id,
+      event_type: event.event_type,
+      payload,
+      previous_hash: event.previous_hash,
+      current_hash: event.current_hash,
+      event_timestamp: payload.event_timestamp,
+    };
+  }
+
   return async function dispatch(event: OutboxEvent): Promise<boolean> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const body = buildControlPlaneRequestBody(event);
 
     try {
       const response = await fetch(options.url, {
@@ -93,7 +139,7 @@ export function createFetchDispatcher(options: FetchDispatcherOptions) {
           ...(options.clientId ? { "x-client-id": options.clientId } : {}),
           ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
         },
-        body: JSON.stringify(event),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 

@@ -11,7 +11,20 @@ const isoDateStringSchema = z.string().refine((value) => !Number.isNaN(Date.pars
 
 const taskPayloadBaseSchema = z
   .object({
-    userId: z.number().int().positive(),
+    request_id: z.string().uuid().optional(),
+    subject_opaque_id: z.string().min(1).optional(),
+    idempotency_key: z.string().uuid().optional(),
+    trigger_source: z
+      .enum(["USER_CONSENT_WITHDRAWAL", "PURPOSE_FULFILLED", "ADMIN_PURGE"])
+      .optional(),
+    actor_opaque_id: z.string().min(1).optional(),
+    legal_framework: z.string().min(1).optional(),
+    request_timestamp: isoDateStringSchema.optional(),
+    tenant_id: z.string().min(1).optional(),
+    cooldown_days: z.number().int().min(0).optional(),
+    shadow_mode: z.boolean().optional(),
+    webhook_url: z.string().url().optional(),
+    userId: z.number().int().positive().optional(),
     now: isoDateStringSchema.optional(),
   })
   .strict();
@@ -23,6 +36,14 @@ const syncTaskSchema = z.discriminatedUnion("task_type", [
       task_type: z.literal("VAULT_USER"),
       payload: taskPayloadBaseSchema.extend({
         shadowMode: z.boolean().optional(),
+      }).superRefine((value, ctx) => {
+        if (!value.subject_opaque_id && value.userId === undefined) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "VAULT_USER payload must include subject_opaque_id or userId.",
+            path: ["subject_opaque_id"],
+          });
+        }
       }),
     })
     .strict(),

@@ -1,12 +1,14 @@
 import type { CoeSigner } from "../../crypto/coe";
+import { fail } from "../../errors";
 import { computeTokenHash, computeWormHash } from "./hash";
-import { ControlPlaneRepository } from "./repository";
+import { ControlPlaneRepository, type ErasureJobRow } from "./repository";
 import type { CreateErasureRequestInput, WorkerAckInput, WorkerOutboxEventInput } from "./schemas";
 
 interface ServiceOptions {
   repository: ControlPlaneRepository;
   signer: CoeSigner;
   workerSharedSecret: string;
+  workerClientName: string;
   maxOutboxPayloadBytes: number;
   now?: () => Date;
 }
@@ -19,12 +21,14 @@ export class ControlPlaneService {
   private readonly repository: ControlPlaneRepository;
   private readonly signer: CoeSigner;
   private readonly workerSharedSecret: string;
+  private readonly workerClientName: string;
   private readonly maxOutboxPayloadBytes: number;
 
   constructor(options: ServiceOptions) {
     this.repository = options.repository;
     this.signer = options.signer;
     this.workerSharedSecret = options.workerSharedSecret;
+    this.workerClientName = options.workerClientName;
     this.maxOutboxPayloadBytes = options.maxOutboxPayloadBytes;
     this.now = options.now ?? (() => new Date());
   }
@@ -34,9 +38,9 @@ export class ControlPlaneService {
    */
   private buildOutboxPayload(input: WorkerOutboxEventInput) {
     return {
-      requestId: input.requestId,
-      targetHash: input.targetHash,
-      eventTimestamp: input.eventTimestamp,
+      request_id: input.request_id,
+      subject_opaque_id: input.subject_opaque_id,
+      event_timestamp: input.event_timestamp,
       payload: input.payload,
     };
   }
@@ -59,6 +63,20 @@ export class ControlPlaneService {
     return value;
   }
 
+  private isCreateRequestEquivalent(existing: ErasureJobRow, input: CreateErasureRequestInput): boolean {
+    return (
+      existing.subject_opaque_id === input.subject_opaque_id &&
+      existing.trigger_source === input.trigger_source &&
+      existing.actor_opaque_id === input.actor_opaque_id &&
+      existing.legal_framework === input.legal_framework &&
+      existing.request_timestamp.toISOString() === new Date(input.request_timestamp).toISOString() &&
+      existing.tenant_id === (input.tenant_id ?? null) &&
+      existing.cooldown_days === input.cooldown_days &&
+      existing.shadow_mode === input.shadow_mode &&
+      existing.webhook_url === (input.webhook_url ?? null)
+    );
+  }
+
   /**
    * Validates whether an outbox retry matches a previously committed event exactly.
    */
@@ -77,11 +95,11 @@ export class ControlPlaneService {
       return false;
     }
 
-    if (existing.event_type !== input.eventType) {
+    if (existing.event_type !== input.event_type) {
       return false;
     }
 
-    if (existing.previous_hash !== input.previousHash || existing.current_hash !== input.currentHash) {
+    if (existing.previous_hash !== input.previous_hash || existing.current_hash !== input.current_hash) {
       return false;
     }
 
@@ -95,25 +113,61 @@ export class ControlPlaneService {
    * Registers an erasure request and queues the first worker task.
    */
   async createErasureRequest(input: CreateErasureRequestInput) {
+    const existingJob = await this.repository.getJobByIdempotencyKey(input.idempotency_key);
+    if (existingJob) {
+      if (!this.isCreateRequestEquivalent(existingJob, input)) {
+        fail({
+          code: "API_ERASURE_REQUEST_IDEMPOTENCY_CONFLICT",
+          title: "Idempotency key conflict",
+          detail: `idempotency_key ${input.idempotency_key} already exists with a different request payload.`,
+          status: 409,
+          category: "integrity",
+          retryable: false,
+        });
+      }
+
+      const existingTask = await this.repository.getTaskByJobId(existingJob.id);
+      return {
+        request_id: existingJob.id,
+        task_id: existingTask?.id ?? null,
+        accepted_at: existingJob.created_at.toISOString(),
+        idempotent_replay: true as const,
+      };
+    }
+
     const now = this.now();
     const jobId = globalThis.crypto.randomUUID();
     const taskId = globalThis.crypto.randomUUID();
     const tokenHash = await computeTokenHash(this.workerSharedSecret);
-    const client = await this.repository.ensureClient(input.clientId, tokenHash);
+    const client = await this.repository.ensureClient(this.workerClientName, tokenHash);
 
-    await this.repository.createJobAndQueueTask({
+    const created = await this.repository.createJobAndQueueTask({
       jobId,
       taskId,
       clientId: client.id,
-      clientInternalUserId: (input.rootUserId ?? 1042).toString(),
-      userUuidHash: input.targetHash,
-      legalBasis: input.legalBasis,
-      retentionYears: input.retentionYears,
-      payload: { userId: input.rootUserId ?? 1042 },
+      request: input,
+      payload: {
+        request_id: jobId,
+        subject_opaque_id: input.subject_opaque_id,
+        idempotency_key: input.idempotency_key,
+        trigger_source: input.trigger_source,
+        actor_opaque_id: input.actor_opaque_id,
+        legal_framework: input.legal_framework,
+        request_timestamp: input.request_timestamp,
+        tenant_id: input.tenant_id,
+        cooldown_days: input.cooldown_days,
+        shadow_mode: input.shadow_mode,
+        webhook_url: input.webhook_url,
+      },
       now,
     });
 
-    return { requestId: jobId, taskId, acceptedAt: now.toISOString() };
+    return {
+      request_id: created.job.id,
+      task_id: created.task.id,
+      accepted_at: created.job.created_at.toISOString(),
+      idempotent_replay: false as const,
+    };
   }
 
   /**
@@ -150,7 +204,56 @@ export class ControlPlaneService {
   }
 
   /**
-   * Finalizes an active worker task and advances the erasure job state machine.
+   * Cancels a queued erasure request before the cooldown window completes.
+   */
+  async cancelErasureRequest(idempotencyKey: string) {
+    const existingJob = await this.repository.getJobByIdempotencyKey(idempotencyKey);
+    if (!existingJob) {
+      return null;
+    }
+
+    if (existingJob.status === "CANCELLED") {
+      return {
+        request_id: existingJob.id,
+        status: existingJob.status,
+        cancelled: true as const,
+        idempotent_replay: true as const,
+      };
+    }
+
+    if (existingJob.status !== "WAITING_COOLDOWN") {
+      fail({
+        code: "API_ERASURE_REQUEST_CANCEL_INVALID_STATE",
+        title: "Erasure request cannot be cancelled",
+        detail: `Erasure request ${existingJob.id} is already ${existingJob.status}.`,
+        status: 409,
+        category: "concurrency",
+        retryable: false,
+      });
+    }
+
+    const cancelled = await this.repository.cancelWaitingJobByIdempotencyKey(idempotencyKey, this.now());
+    if (!cancelled) {
+      fail({
+        code: "API_ERASURE_REQUEST_CANCEL_RACE",
+        title: "Cancellation race detected",
+        detail: `Erasure request ${existingJob.id} changed state before cancellation completed.`,
+        status: 409,
+        category: "concurrency",
+        retryable: true,
+      });
+    }
+
+    return {
+      request_id: cancelled.id,
+      status: cancelled.status,
+      cancelled: true as const,
+      idempotent_replay: false as const,
+    };
+  }
+
+  /**
+   * Finalizes an active worker task.
    */
   async ackWorkerTask(taskId: string, input: WorkerAckInput) {
     const task = await this.repository.ackTask(taskId, input.status, input.result, this.now());
@@ -159,7 +262,7 @@ export class ControlPlaneService {
     }
 
     return {
-      taskId: task.id,
+      task_id: task.id,
       status: task.status,
     };
   }
@@ -169,83 +272,143 @@ export class ControlPlaneService {
    */
   async ingestWorkerOutbox(input: WorkerOutboxEventInput, clientId: string) {
     const now = this.now();
-    const existingEvent = await this.repository.getAuditEventByIdempotencyKey(input.idempotencyKey);
+    const existingEvent = await this.repository.getAuditEventByIdempotencyKey(input.idempotency_key);
     if (existingEvent) {
       if (this.isReplayEquivalent(existingEvent, input, clientId)) {
-        return { accepted: true as const, idempotentReplay: true as const };
+        return { accepted: true as const, idempotent_replay: true as const };
       }
 
-      throw new Error("idempotencyKey already exists with a different event payload.");
+      fail({
+        code: "API_OUTBOX_IDEMPOTENCY_CONFLICT",
+        title: "Outbox idempotency conflict",
+        detail: `idempotency_key ${input.idempotency_key} already exists with a different event payload.`,
+        status: 409,
+        category: "integrity",
+        retryable: false,
+      });
     }
 
-    const job = await this.repository.getJobById(input.requestId);
+    const job = await this.repository.getJobById(input.request_id);
     if (!job) {
-      throw new Error(`Unknown requestId: ${input.requestId}`);
+      fail({
+        code: "API_OUTBOX_REQUEST_UNKNOWN",
+        title: "Unknown request id",
+        detail: `Unknown request_id: ${input.request_id}.`,
+        status: 404,
+        category: "validation",
+        retryable: false,
+      });
     }
 
     if (job.client_id !== clientId) {
-      throw new Error("worker is not authorized for this request.");
+      fail({
+        code: "API_OUTBOX_WORKER_UNAUTHORIZED",
+        title: "Worker is not authorized for this request",
+        detail: `Worker is not authorized to append events for request ${input.request_id}.`,
+        status: 403,
+        category: "authorization",
+        retryable: false,
+      });
     }
 
-    if (job.user_uuid_hash !== input.targetHash) {
-      throw new Error("targetHash does not match registered request.");
+    if (job.subject_opaque_id !== input.subject_opaque_id) {
+      fail({
+        code: "API_OUTBOX_SUBJECT_MISMATCH",
+        title: "Subject mismatch",
+        detail: `subject_opaque_id does not match request ${input.request_id}.`,
+        status: 409,
+        category: "integrity",
+        retryable: false,
+      });
     }
 
     const payloadBytes = new TextEncoder().encode(JSON.stringify(input.payload)).byteLength;
     if (payloadBytes > this.maxOutboxPayloadBytes) {
-      throw new Error(`outbox payload exceeds ${this.maxOutboxPayloadBytes} bytes.`);
+      fail({
+        code: "API_OUTBOX_PAYLOAD_TOO_LARGE",
+        title: "Outbox payload too large",
+        detail: `Outbox payload exceeds ${this.maxOutboxPayloadBytes} bytes.`,
+        status: 413,
+        category: "validation",
+        retryable: false,
+      });
     }
 
     const latestHash = (await this.repository.getLatestAuditHash(clientId)) ?? "GENESIS";
-    if (input.previousHash !== latestHash) {
-      throw new Error("previousHash does not match the latest audit ledger hash.");
+    if (input.previous_hash !== latestHash) {
+      fail({
+        code: "API_OUTBOX_PREVIOUS_HASH_INVALID",
+        title: "Outbox chain head mismatch",
+        detail: "previous_hash does not match the latest audit ledger hash.",
+        status: 409,
+        category: "integrity",
+        retryable: false,
+      });
     }
 
-    const expectedCurrentHash = await computeWormHash(input.previousHash, input.payload);
-    if (expectedCurrentHash !== input.currentHash) {
-      throw new Error("currentHash is invalid for the provided payload chain.");
+    const expectedCurrentHash = await computeWormHash(input.previous_hash, input.payload, input.idempotency_key);
+    if (expectedCurrentHash !== input.current_hash) {
+      fail({
+        code: "API_OUTBOX_CURRENT_HASH_INVALID",
+        title: "Outbox chain hash invalid",
+        detail: "current_hash is invalid for the provided payload chain.",
+        status: 400,
+        category: "integrity",
+        retryable: false,
+      });
     }
 
     const outboxPayload = this.buildOutboxPayload(input);
     const inserted = await this.repository.insertAuditLedgerEvent({
       clientId,
-      idempotencyKey: input.idempotencyKey,
-      eventType: input.eventType,
+      idempotencyKey: input.idempotency_key,
+      eventType: input.event_type,
       payload: outboxPayload,
-      previousHash: input.previousHash,
-      currentHash: input.currentHash,
+      previousHash: input.previous_hash,
+      currentHash: input.current_hash,
       now,
     });
 
     if (!inserted) {
-      const racedEvent = await this.repository.getAuditEventByIdempotencyKey(input.idempotencyKey);
+      const racedEvent = await this.repository.getAuditEventByIdempotencyKey(input.idempotency_key);
       if (racedEvent && this.isReplayEquivalent(racedEvent, input, clientId)) {
-        return { accepted: true as const, idempotentReplay: true as const };
+        return { accepted: true as const, idempotent_replay: true as const };
       }
 
-      throw new Error("idempotencyKey conflict detected for a non-equivalent event.");
+      fail({
+        code: "API_OUTBOX_RACE_CONFLICT",
+        title: "Outbox idempotency race conflict",
+        detail: `idempotency_key ${input.idempotency_key} conflicted with a different event during insert.`,
+        status: 409,
+        category: "concurrency",
+        retryable: true,
+      });
     }
 
-    if (input.eventType === "SHRED_SUCCESS") {
-      const shreddedAt = new Date(input.eventTimestamp);
+    if (input.event_type === "SHRED_SUCCESS" || input.event_type === "USER_HARD_DELETED") {
+      const shreddedAt = new Date(input.event_timestamp);
       const certificatePayload = {
-        requestId: job.id,
-        targetHash: job.user_uuid_hash,
-        method: "CRYPTO_SHREDDING_DEK_DELETE",
-        legalFramework: job.legal_basis,
-        shreddedAt: shreddedAt.toISOString(),
+        request_id: job.id,
+        subject_opaque_id: job.subject_opaque_id,
+        method:
+          input.event_type === "SHRED_SUCCESS" ? "CRYPTO_SHREDDING_DEK_DELETE" : "DIRECT_DELETE_ROOT_ROW",
+        legal_framework: job.legal_framework,
+        shredded_at: shreddedAt.toISOString(),
       };
       const signature = await this.signer.sign(certificatePayload);
 
       await this.repository.transitionJobFromOutbox({
-        jobId: input.requestId,
-        eventType: input.eventType,
+        jobId: input.request_id,
+        eventType: input.event_type,
         now,
         shreddedAt,
       });
       await this.repository.insertCertificate({
         requestId: job.id,
-        targetHash: job.user_uuid_hash,
+        subjectOpaqueId: job.subject_opaque_id,
+        method:
+          input.event_type === "SHRED_SUCCESS" ? "CRYPTO_SHREDDING_DEK_DELETE" : "DIRECT_DELETE_ROOT_ROW",
+        legalFramework: job.legal_framework,
         shreddedAt,
         payload: certificatePayload,
         signatureBase64: signature.signatureBase64,
@@ -255,13 +418,13 @@ export class ControlPlaneService {
       });
     } else {
       await this.repository.transitionJobFromOutbox({
-        jobId: input.requestId,
-        eventType: input.eventType,
+        jobId: input.request_id,
+        eventType: input.event_type,
         now,
       });
     }
 
-    return { accepted: true as const, idempotentReplay: false as const };
+    return { accepted: true as const, idempotent_replay: false as const };
   }
 
   /**
