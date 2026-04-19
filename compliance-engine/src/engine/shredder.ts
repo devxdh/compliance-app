@@ -103,6 +103,8 @@ export async function shredUser(
   }
 
   return sql.begin("isolation level repeatable read", async (tx) => {
+    await tx.unsafe("SET LOCAL lock_timeout = '5s'");
+
     const [lockedVault] = await tx`
       SELECT *
       FROM ${tx(engineSchema)}.pii_vault

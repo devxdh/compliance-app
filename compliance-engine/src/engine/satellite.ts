@@ -6,6 +6,15 @@ interface SatelliteRowId {
   id: number;
 }
 
+async function yieldWorkerEventLoop(): Promise<void> {
+  if (typeof globalThis.Bun !== "undefined" && typeof globalThis.Bun.sleep === "function") {
+    await globalThis.Bun.sleep(0);
+    return;
+  }
+
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
 function parseQualifiedTableName(tableName: string) {
   const [schema, table, ...rest] = tableName.split(".");
   if (!schema || !table || rest.length > 0) {
@@ -29,7 +38,8 @@ function parseQualifiedTableName(tableName: string) {
  * Redacts satellite table rows in cursor-sized batches using `FOR UPDATE SKIP LOCKED`.
  *
  * The function is designed for large tables and concurrent workers:
- * each iteration locks and updates only one batch, then continues until no rows remain.
+ * each iteration locks and updates only one batch, yields back to Bun's event loop, then
+ * continues until no rows remain.
  *
  * @param tx - Active worker transaction.
  * @param tableName - Qualified table name in `schema.table` form.
@@ -86,6 +96,7 @@ export async function redactSatelliteTable(
     }
 
     totalRedacted += updatedRows.length;
+    await yieldWorkerEventLoop();
   }
 
   return totalRedacted;

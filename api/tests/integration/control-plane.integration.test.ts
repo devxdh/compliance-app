@@ -19,7 +19,13 @@ describe("Control Plane API (Integration)", () => {
     await sql.end();
   });
 
-  async function setup() {
+  async function setup(
+    overrides: {
+      now?: () => Date;
+      taskMaxAttempts?: number;
+      taskBaseBackoffMs?: number;
+    } = {}
+  ) {
     const controlSchema = uniqueSchema("control_api");
     schemasToDrop.push(controlSchema);
     await dropSchemas(sql, controlSchema);
@@ -32,6 +38,9 @@ describe("Control Plane API (Integration)", () => {
       workerSharedSecret: "worker-secret",
       workerClientName: "worker-1",
       maxOutboxPayloadBytes: 2048,
+      taskMaxAttempts: overrides.taskMaxAttempts,
+      taskBaseBackoffMs: overrides.taskBaseBackoffMs,
+      now: overrides.now,
     });
 
     return { app, controlSchema };
@@ -277,6 +286,165 @@ describe("Control Plane API (Integration)", () => {
     });
     expect(syncResponse.status).toBe(200);
     expect(await syncResponse.json()).toEqual({ pending: false });
+  });
+
+  it("requeues retryable task failures with exponential backoff before redispatch", async () => {
+    let now = new Date("2026-04-19T10:00:00.000Z");
+    const { app, controlSchema } = await setup({
+      now: () => now,
+      taskMaxAttempts: 3,
+      taskBaseBackoffMs: 1000,
+    });
+
+    const request = buildErasureRequest({ subject_opaque_id: "usr_retry_task", cooldown_days: 0 });
+    const createResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const created = (await createResponse.json()) as { request_id: string; task_id: string };
+
+    const syncResponse = await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+    expect(syncResponse.status).toBe(200);
+
+    const ackResponse = await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        status: "failed",
+        result: {
+          error: {
+            code: "DPDP_DB_SERIALIZATION_FAILURE",
+            title: "Serialization failure",
+            detail: "Concurrent writer forced rollback.",
+            category: "concurrency",
+            retryable: true,
+            fatal: false,
+          },
+        },
+      }),
+    });
+    expect(ackResponse.status).toBe(200);
+    expect(await ackResponse.json()).toEqual(
+      expect.objectContaining({
+        ok: true,
+        task_id: created.task_id,
+        status: "QUEUED",
+      })
+    );
+
+    const [taskAfterFailure] = await sql<{
+      status: string;
+      attempt_count: number;
+      next_attempt_at: Date;
+    }[]>`
+      SELECT status, attempt_count, next_attempt_at
+      FROM ${sql(controlSchema)}.task_queue
+      WHERE id = ${created.task_id}
+    `;
+    expect(taskAfterFailure?.status).toBe("QUEUED");
+    expect(taskAfterFailure?.attempt_count).toBe(1);
+    expect(new Date(taskAfterFailure!.next_attempt_at).toISOString()).toBe("2026-04-19T10:00:01.000Z");
+
+    const beforeDueSync = await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+    expect(beforeDueSync.status).toBe(200);
+    expect(await beforeDueSync.json()).toEqual({ pending: false });
+
+    now = new Date("2026-04-19T10:00:01.000Z");
+    const afterDueSync = await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+    expect(afterDueSync.status).toBe(200);
+    expect(await afterDueSync.json()).toEqual(
+      expect.objectContaining({
+        pending: true,
+        task: expect.objectContaining({
+          id: created.task_id,
+        }),
+      })
+    );
+  });
+
+  it("dead-letters non-retryable task failures and marks the job as failed", async () => {
+    const { app, controlSchema } = await setup({
+      now: () => new Date("2026-04-19T10:00:00.000Z"),
+      taskMaxAttempts: 3,
+      taskBaseBackoffMs: 1000,
+    });
+
+    const request = buildErasureRequest({ subject_opaque_id: "usr_dead_letter", cooldown_days: 0 });
+    const createResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const created = (await createResponse.json()) as { request_id: string; task_id: string };
+
+    await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+
+    const ackResponse = await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        status: "failed",
+        result: {
+          error: {
+            code: "DPDP_TASK_PAYLOAD_INVALID",
+            title: "Invalid task payload",
+            detail: "Opaque identifier is malformed.",
+            category: "validation",
+            retryable: false,
+            fatal: false,
+          },
+        },
+      }),
+    });
+    expect(ackResponse.status).toBe(200);
+    expect(await ackResponse.json()).toEqual(
+      expect.objectContaining({
+        ok: true,
+        task_id: created.task_id,
+        status: "DEAD_LETTER",
+      })
+    );
+
+    const [taskRow] = await sql<{
+      status: string;
+      attempt_count: number;
+      dead_lettered_at: Date | null;
+    }[]>`
+      SELECT status, attempt_count, dead_lettered_at
+      FROM ${sql(controlSchema)}.task_queue
+      WHERE id = ${created.task_id}
+    `;
+    expect(taskRow).toEqual({
+      status: "DEAD_LETTER",
+      attempt_count: 1,
+      dead_lettered_at: new Date("2026-04-19T10:00:00.000Z"),
+    });
+
+    const [jobRow] = await sql<{ status: string }[]>`
+      SELECT status
+      FROM ${sql(controlSchema)}.erasure_jobs
+      WHERE id = ${created.request_id}
+    `;
+    expect(jobRow?.status).toBe("FAILED");
   });
 
   it("ingests a chained USER_VAULTED event and transitions the job to VAULTED", async () => {
@@ -528,9 +696,101 @@ describe("Control Plane API (Integration)", () => {
         webhookUrl,
         expect.objectContaining({
           method: "POST",
+          headers: expect.objectContaining({ "content-type": "application/json" }),
+        })
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("retries terminal webhook delivery on idempotent SHRED_SUCCESS replay", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "bad gateway" }), {
+          status: 502,
+          headers: { "content-type": "application/json" },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
           headers: { "content-type": "application/json" },
         })
       );
+
+    try {
+      const { app } = await setup();
+      const request = buildErasureRequest({
+        subject_opaque_id: "usr_webhook_replay",
+        cooldown_days: 0,
+        webhook_url: "https://client.example.com/hooks/replay",
+      });
+      const createResponse = await app.request("/api/v1/erasure-requests", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      });
+      const created = (await createResponse.json()) as { request_id: string; task_id: string };
+
+      await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...buildWorkerAuthHeaders(),
+        },
+        body: JSON.stringify({
+          status: "completed",
+          result: { action: "vaulted" },
+        }),
+      });
+
+      const shredPayload = {
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        trigger_source: request.trigger_source,
+        legal_framework: request.legal_framework,
+        actor_opaque_id: request.actor_opaque_id,
+        applied_rule_name: "PMLA_FINANCIAL",
+        event_timestamp: "2036-04-19T10:00:00.000Z",
+        shredded_at: "2036-04-19T10:00:00.000Z",
+      };
+      const shredEvent = {
+        idempotency_key: `shred:${created.request_id}`,
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        event_type: "SHRED_SUCCESS",
+        payload: shredPayload,
+        previous_hash: "GENESIS",
+        current_hash: await computeCurrentHash("GENESIS", shredPayload),
+        event_timestamp: "2036-04-19T10:00:00.000Z",
+      };
+
+      const firstResponse = await app.request("/api/v1/worker/outbox", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...buildWorkerAuthHeaders(),
+        },
+        body: JSON.stringify(shredEvent),
+      });
+      expect(firstResponse.status).toBe(502);
+
+      const replayResponse = await app.request("/api/v1/worker/outbox", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...buildWorkerAuthHeaders(),
+        },
+        body: JSON.stringify(shredEvent),
+      });
+      expect(replayResponse.status).toBe(202);
+      expect(await replayResponse.json()).toEqual({
+        accepted: true,
+        idempotent_replay: true,
+      });
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
     } finally {
       fetchSpy.mockRestore();
     }

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { generateDEK, wrapKey, unwrapKey } from "../src/crypto/envelope";
-import { encryptGCM, decryptGCM } from "../src/crypto/aes";
+import { decryptGCM, decryptGCMBytes, encryptGCM } from "../src/crypto/aes";
 import { generateHMAC } from "../src/crypto/hmac";
 
 describe("Cryptographic Core (AES-256-GCM + Envelope + HMAC)", () => {
@@ -18,6 +18,17 @@ describe("Cryptographic Core (AES-256-GCM + Envelope + HMAC)", () => {
       // 2. Decrypt
       const decryptedPII = await decryptGCM(encryptedPII, userDEK);
       expect(decryptedPII).toBe(rawPII);
+    });
+
+    it("should expose decrypted bytes for callers that need explicit memory wiping", async () => {
+      const userDEK = generateDEK();
+      const encryptedPII = await encryptGCM(rawPII, userDEK);
+
+      const decryptedBytes = await decryptGCMBytes(encryptedPII, userDEK);
+      expect(new TextDecoder().decode(decryptedBytes)).toBe(rawPII);
+
+      decryptedBytes.fill(0);
+      expect(Array.from(decryptedBytes).every((byte) => byte === 0)).toBe(true);
     });
 
     it("should successfully wrap and unwrap a DEK using a Master KEK", async () => {

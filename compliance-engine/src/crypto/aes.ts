@@ -82,12 +82,15 @@ export async function encryptGCM(plaintext: string, rawKey: Uint8Array): Promise
 /**
  * Decrypts a buffer in `IV || ciphertext+tag` format.
  *
+ * Returns raw bytes so high-sensitivity callers can zero the decrypted buffer immediately after
+ * parsing, instead of leaving plaintext in immutable JS string storage.
+ *
  * @param combined - Combined encrypted payload produced by `encryptGCM`.
  * @param rawKey - 32-byte symmetric key.
- * @returns Decrypted UTF-8 plaintext.
+ * @returns Decrypted plaintext bytes.
  * @throws {WorkerError} When key/ciphertext is invalid or integrity verification fails.
  */
-export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Promise<string> {
+export async function decryptGCMBytes(combined: Uint8Array, rawKey: Uint8Array): Promise<Uint8Array> {
   assertAesKeyLength(rawKey);
 
   if (combined.length < IV_LENGTH + 16) {
@@ -125,5 +128,25 @@ export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Prom
     });
   }
 
-  return textDecoder.decode(decryptedBuffer);
+  return new Uint8Array(decryptedBuffer);
+}
+
+/**
+ * Decrypts a buffer in `IV || ciphertext+tag` format` and decodes it as UTF-8 text.
+ *
+ * Prefer `decryptGCMBytes` when handling raw PII so the caller can explicitly wipe the plaintext
+ * buffer after use.
+ *
+ * @param combined - Combined encrypted payload produced by `encryptGCM`.
+ * @param rawKey - 32-byte symmetric key.
+ * @returns Decrypted UTF-8 plaintext.
+ * @throws {WorkerError} When key/ciphertext is invalid or integrity verification fails.
+ */
+export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Promise<string> {
+  const decryptedBytes = await decryptGCMBytes(combined, rawKey);
+  try {
+    return textDecoder.decode(decryptedBytes);
+  } finally {
+    decryptedBytes.fill(0);
+  }
 }

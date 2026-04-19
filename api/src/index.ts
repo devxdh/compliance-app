@@ -26,6 +26,8 @@ const app = createApp({
   workerClientName: env.WORKER_CLIENT_NAME,
   maxOutboxPayloadBytes: env.MAX_OUTBOX_PAYLOAD_BYTES,
   taskLeaseSeconds: env.WORKER_TASK_LEASE_SECONDS,
+  taskMaxAttempts: env.TASK_MAX_ATTEMPTS,
+  taskBaseBackoffMs: env.TASK_BASE_BACKOFF_MS,
   webhookTimeoutMs: env.WEBHOOK_TIMEOUT_MS,
 });
 

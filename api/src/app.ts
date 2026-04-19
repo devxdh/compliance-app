@@ -19,7 +19,10 @@ export interface CreateAppOptions {
   workerClientName?: string;
   maxOutboxPayloadBytes?: number;
   taskLeaseSeconds?: number;
+  taskMaxAttempts?: number;
+  taskBaseBackoffMs?: number;
   webhookTimeoutMs?: number;
+  now?: () => Date;
 }
 
 const logger = getLogger({ component: "http" });
@@ -66,7 +69,9 @@ export function createApp(options: CreateAppOptions) {
   const repository = new ControlPlaneRepository(
     options.sql,
     options.controlSchema,
-    options.taskLeaseSeconds ?? 60
+    options.taskLeaseSeconds ?? 60,
+    options.taskMaxAttempts ?? 10,
+    options.taskBaseBackoffMs ?? 1000
   );
   const service = new ControlPlaneService({
     repository,
@@ -75,6 +80,7 @@ export function createApp(options: CreateAppOptions) {
     workerClientName: options.workerClientName ?? "worker-1",
     maxOutboxPayloadBytes: options.maxOutboxPayloadBytes ?? 32_768,
     webhookTimeoutMs: options.webhookTimeoutMs,
+    now: options.now,
   });
 
   app.use("*", requestContextMiddleware);

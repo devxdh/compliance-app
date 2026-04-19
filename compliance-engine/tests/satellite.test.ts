@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import postgres from "postgres";
 import { redactSatelliteTable } from "../src/engine/satellite";
 import { createTestSql, dropSchemas, uniqueSchema } from "./helpers/db";
@@ -78,5 +78,38 @@ describe("Satellite Table Chunking", () => {
     );
 
     expect(redacted).toBe(0);
+  });
+
+  it("yields to the Bun event loop between satellite batches", async () => {
+    const { schema } = await prepare();
+
+    for (let index = 0; index < 3; index += 1) {
+      await sql`
+        INSERT INTO ${sql(schema)}.orders (user_ref, amount)
+        VALUES ('yield-user', ${index + 1})
+      `;
+    }
+
+    const originalBun = globalThis.Bun;
+    const sleep = vi.fn(async () => {});
+    vi.stubGlobal("Bun", {
+      ...(originalBun ?? {}),
+      sleep,
+    });
+    try {
+      const redacted = await sql.begin((tx) =>
+        redactSatelliteTable(tx, `${schema}.orders`, "user_ref", "yield-user", "hmac-user", 1)
+      );
+
+      expect(redacted).toBe(3);
+      expect(sleep).toHaveBeenCalledTimes(3);
+      expect(sleep).toHaveBeenCalledWith(0);
+    } finally {
+      if (originalBun === undefined) {
+        vi.unstubAllGlobals();
+      } else {
+        vi.stubGlobal("Bun", originalBun);
+      }
+    }
   });
 });

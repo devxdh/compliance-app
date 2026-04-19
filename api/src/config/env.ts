@@ -5,6 +5,8 @@ const envSchema = z.object({
   API_CONTROL_SCHEMA: z.string().min(1).default("dpdp_control"),
   PORT: z.coerce.number().int().positive().default(3000),
   WORKER_TASK_LEASE_SECONDS: z.coerce.number().int().positive().default(60),
+  TASK_MAX_ATTEMPTS: z.coerce.number().int().positive().default(10),
+  TASK_BASE_BACKOFF_MS: z.coerce.number().int().positive().default(1000),
   WORKER_SHARED_SECRET: z.string().min(1).default("worker-secret"),
   WORKER_CLIENT_NAME: z.string().min(1).default("worker-1"),
   MAX_OUTBOX_PAYLOAD_BYTES: z.coerce.number().int().positive().default(32768),

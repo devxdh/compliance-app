@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import { decryptGCM } from "../crypto/aes";
+import { decryptGCMBytes } from "../crypto/aes";
 import { unwrapKey } from "../crypto/envelope";
 import { assertIdentifier } from "../db/identifiers";
 import { fail } from "../errors";
@@ -9,6 +9,7 @@ import { assertWorkerSecrets, enqueueOutboxEvent, getVaultRecordByUserId, resolv
 import type { VaultRecord } from "./support";
 
 const logger = getLogger({ component: "notifier" });
+const textDecoder = new TextDecoder();
 
 export interface MailMessage {
   to: string;
@@ -68,6 +69,13 @@ function resolveNoticeColumns(options: DispatchNoticeOptions): { emailColumn: st
   }
 
   const configuredColumns = new Set(Object.keys(options.rootPiiColumns ?? {}));
+  if (configuredColumns.size === 0) {
+    return {
+      emailColumn: "email",
+      nameColumn: "full_name",
+    };
+  }
+
   if (configuredColumns.has("email")) {
     return {
       emailColumn: "email",
@@ -131,7 +139,9 @@ async function reserveNotice(
 ): Promise<NoticeReservation> {
   const normalizedSubjectId = String(subjectId);
 
-  return sql.begin(async (tx) => {
+  return sql.begin("isolation level repeatable read", async (tx) => {
+    await tx.unsafe("SET LOCAL lock_timeout = '5s'");
+
     const [vault] = await tx<VaultRecord[]>`
       SELECT *
       FROM ${tx(engineSchema)}.pii_vault
@@ -321,7 +331,7 @@ export async function dispatchPreErasureNotice(
   let encryptedDek: Uint8Array | null = null;
   let dek: Uint8Array | null = null;
   let encryptedPayload: Uint8Array | null = null;
-  let decryptedPii = "";
+  let decryptedPiiBytes: Uint8Array | null = null;
   let lockId: string | null = null;
 
   try {
@@ -374,9 +384,8 @@ export async function dispatchPreErasureNotice(
     }
 
     encryptedPayload = new Uint8Array(Buffer.from(payload.data, "base64"));
-    decryptedPii = await decryptGCM(encryptedPayload, dek);
-
-    const parsed = JSON.parse(decryptedPii) as Record<string, unknown>;
+    decryptedPiiBytes = await decryptGCMBytes(encryptedPayload, dek);
+    const parsed = JSON.parse(textDecoder.decode(decryptedPiiBytes)) as Record<string, unknown>;
     const emailCandidate = parsed[noticeColumns.emailColumn];
     const email = typeof emailCandidate === "string" && emailCandidate.trim().length > 0 ? emailCandidate.trim() : null;
     if (!email) {
@@ -400,7 +409,9 @@ export async function dispatchPreErasureNotice(
       idempotencyKey: mailIdempotencyKey,
     });
 
-    await sql.begin(async (tx) => {
+    await sql.begin("isolation level repeatable read", async (tx) => {
+      await tx.unsafe("SET LOCAL lock_timeout = '5s'");
+
       const updated = await tx`
         UPDATE ${tx(engineSchema)}.pii_vault
         SET notification_sent_at = ${now},
@@ -485,6 +496,6 @@ export async function dispatchPreErasureNotice(
     encryptedDek?.fill(0);
     dek?.fill(0);
     encryptedPayload?.fill(0);
-    decryptedPii = "";
+    decryptedPiiBytes?.fill(0);
   }
 }

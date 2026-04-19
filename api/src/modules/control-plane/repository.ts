@@ -39,11 +39,14 @@ export interface TaskQueueRow {
   erasure_job_id: string;
   task_type: "VAULT_USER";
   payload: Record<string, unknown>;
-  status: "QUEUED" | "DISPATCHED" | "COMPLETED" | "FAILED";
+  status: "QUEUED" | "DISPATCHED" | "COMPLETED" | "FAILED" | "DEAD_LETTER";
   worker_client_name: string | null;
   leased_at: Date | null;
   lease_expires_at: Date | null;
   completed_at: Date | null;
+  attempt_count: number;
+  next_attempt_at: Date;
+  dead_lettered_at: Date | null;
   error_text: string | null;
   created_at: Date;
   updated_at: Date;
@@ -80,6 +83,34 @@ interface CreatedJobRecord {
   task: TaskQueueRow;
 }
 
+interface TaskFailureEnvelope {
+  error?: {
+    retryable?: boolean;
+    fatal?: boolean;
+  };
+}
+
+function calculateTaskRetryDelayMs(attemptNumber: number, baseBackoffMs: number): number {
+  return Math.min(baseBackoffMs * 2 ** Math.max(0, attemptNumber - 1), 5 * 60 * 1000);
+}
+
+function shouldRetryTaskFailure(result: unknown): boolean {
+  if (!result || typeof result !== "object") {
+    return true;
+  }
+
+  const failure = result as TaskFailureEnvelope;
+  if (!failure.error || typeof failure.error !== "object") {
+    return true;
+  }
+
+  if (failure.error.fatal === true) {
+    return false;
+  }
+
+  return failure.error.retryable !== false;
+}
+
 /**
  * Postgres.js repository for the control-plane state machine.
  */
@@ -87,7 +118,9 @@ export class ControlPlaneRepository {
   constructor(
     private readonly sql: postgres.Sql,
     private readonly schema: string,
-    private readonly taskLeaseSeconds: number
+    private readonly taskLeaseSeconds: number,
+    private readonly taskMaxAttempts: number,
+    private readonly taskBaseBackoffMs: number
   ) {}
 
   /**
@@ -233,6 +266,8 @@ export class ControlPlaneRepository {
           task_type,
           payload,
           status,
+          attempt_count,
+          next_attempt_at,
           created_at,
           updated_at
         )
@@ -243,6 +278,8 @@ export class ControlPlaneRepository {
           'VAULT_USER',
           ${tx.json(input.payload as postgres.JSONValue)},
           'QUEUED',
+          0,
+          ${input.now},
           ${input.now},
           ${input.now}
         )
@@ -310,10 +347,11 @@ export class ControlPlaneRepository {
           ON ej.id = tq.erasure_job_id
         WHERE tq.client_id = ${clientId}
           AND tq.status IN ('QUEUED', 'DISPATCHED')
+          AND tq.next_attempt_at <= ${now}
           AND (tq.status = 'QUEUED' OR tq.lease_expires_at IS NULL OR tq.lease_expires_at <= ${now})
           AND ej.vault_due_at <= NOW()
           AND ej.status NOT IN ('CANCELLED', 'SHREDDED')
-        ORDER BY ej.vault_due_at ASC, tq.created_at ASC
+        ORDER BY ej.vault_due_at ASC, tq.next_attempt_at ASC, tq.created_at ASC
         LIMIT 1
         FOR UPDATE OF tq, ej SKIP LOCKED
       `;
@@ -346,13 +384,17 @@ export class ControlPlaneRepository {
   }
 
   /**
-   * Acknowledges task completion/failure and applies downstream job failure transition when required.
+   * Acknowledges task completion/failure and applies retry/DLQ state transitions.
+   *
+   * Failed tasks are re-queued with exponential backoff when the worker reports a retryable error.
+   * Non-retryable failures, fatal failures, or attempts that exhaust the configured ceiling are routed
+   * to `DEAD_LETTER`, and the parent erasure job is marked `FAILED`.
    *
    * @param taskId - Task UUID.
    * @param status - Worker ack status.
    * @param result - Worker result payload persisted for diagnostics.
    * @param now - Completion timestamp.
-   * @returns Updated task row, existing terminal row, or `null` when task is missing.
+   * @returns Updated task row, current non-dispatched row, or `null` when task is missing.
    */
   async ackTask(taskId: string, status: "completed" | "failed", result: unknown, now: Date): Promise<TaskQueueRow | null> {
     return this.sql.begin(async (tx) => {
@@ -367,30 +409,68 @@ export class ControlPlaneRepository {
         return null;
       }
 
-      if (task.status === "COMPLETED" || task.status === "FAILED") {
+      if (task.status !== "DISPATCHED") {
         return task;
       }
 
-      const nextTaskState = status === "completed" ? "COMPLETED" : "FAILED";
-      const [updated] = await tx<TaskQueueRow[]>`
-        UPDATE ${tx(this.schema)}.task_queue
-        SET status = ${nextTaskState},
-            completed_at = ${now},
-            error_text = ${status === "failed" ? JSON.stringify(result) : null},
-            lease_expires_at = NULL,
-            updated_at = ${now}
-        WHERE id = ${taskId}
-        RETURNING *
-      `;
+      if (status === "completed") {
+        const [updated] = await tx<TaskQueueRow[]>`
+          UPDATE ${tx(this.schema)}.task_queue
+          SET status = 'COMPLETED',
+              completed_at = ${now},
+              error_text = NULL,
+              lease_expires_at = NULL,
+              updated_at = ${now}
+          WHERE id = ${taskId}
+          RETURNING *
+        `;
 
-      if (status === "failed") {
+        return updated ?? null;
+      }
+
+      const attemptNumber = task.attempt_count + 1;
+      const retryable = shouldRetryTaskFailure(result);
+      const exhausted = attemptNumber >= this.taskMaxAttempts;
+
+      if (!retryable || exhausted) {
+        const [updated] = await tx<TaskQueueRow[]>`
+          UPDATE ${tx(this.schema)}.task_queue
+          SET status = 'DEAD_LETTER',
+              attempt_count = ${attemptNumber},
+              completed_at = ${now},
+              dead_lettered_at = ${now},
+              error_text = ${JSON.stringify(result)},
+              lease_expires_at = NULL,
+              updated_at = ${now}
+          WHERE id = ${taskId}
+          RETURNING *
+        `;
+
         await tx`
           UPDATE ${tx(this.schema)}.erasure_jobs
           SET status = 'FAILED',
               updated_at = ${now}
           WHERE id = ${task.erasure_job_id}
         `;
+
+        return updated ?? null;
       }
+
+      const retryDelayMs = calculateTaskRetryDelayMs(attemptNumber, this.taskBaseBackoffMs);
+      const [updated] = await tx<TaskQueueRow[]>`
+        UPDATE ${tx(this.schema)}.task_queue
+        SET status = 'QUEUED',
+            worker_client_name = NULL,
+            leased_at = NULL,
+            lease_expires_at = NULL,
+            completed_at = NULL,
+            attempt_count = ${attemptNumber},
+            next_attempt_at = ${now}::timestamptz + (${retryDelayMs} * interval '1 millisecond'),
+            error_text = ${JSON.stringify(result)},
+            updated_at = ${now}
+        WHERE id = ${taskId}
+        RETURNING *
+      `;
 
       return updated ?? null;
     });

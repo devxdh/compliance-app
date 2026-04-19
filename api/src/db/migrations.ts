@@ -95,6 +95,9 @@ export async function migrateApiSchema(sql: postgres.Sql, controlSchema: string 
       ADD COLUMN IF NOT EXISTS leased_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ADD COLUMN IF NOT EXISTS dead_lettered_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS error_text TEXT,
       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     `;
@@ -102,7 +105,7 @@ export async function migrateApiSchema(sql: postgres.Sql, controlSchema: string 
     await tx`ALTER TABLE ${tx(safeSchema)}.task_queue DROP CONSTRAINT IF EXISTS task_queue_status_check`;
     await tx`
       ALTER TABLE ${tx(safeSchema)}.task_queue
-      ADD CONSTRAINT task_queue_status_check CHECK (status IN ('QUEUED', 'DISPATCHED', 'COMPLETED', 'FAILED'))
+      ADD CONSTRAINT task_queue_status_check CHECK (status IN ('QUEUED', 'DISPATCHED', 'COMPLETED', 'FAILED', 'DEAD_LETTER'))
     `;
 
     await tx`
@@ -159,14 +162,20 @@ export async function migrateApiSchema(sql: postgres.Sql, controlSchema: string 
       ON ${tx(safeSchema)}.erasure_jobs (status, vault_due_at, created_at)
     `;
 
+    await tx`DROP INDEX IF EXISTS ${tx(safeSchema)}.task_queue_claim_idx`;
     await tx`
-      CREATE INDEX IF NOT EXISTS task_queue_claim_idx
-      ON ${tx(safeSchema)}.task_queue (status, lease_expires_at, created_at)
+      CREATE INDEX task_queue_claim_idx
+      ON ${tx(safeSchema)}.task_queue (status, next_attempt_at, lease_expires_at, created_at)
     `;
 
     await tx`
       CREATE INDEX IF NOT EXISTS task_queue_job_idx
       ON ${tx(safeSchema)}.task_queue (erasure_job_id, status)
+    `;
+
+    await tx`
+      CREATE INDEX IF NOT EXISTS task_queue_dead_letter_idx
+      ON ${tx(safeSchema)}.task_queue (status, dead_lettered_at)
     `;
 
     await tx`

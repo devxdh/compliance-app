@@ -18,6 +18,28 @@ function resolveCertificateMethod(eventType: "SHRED_SUCCESS" | "USER_HARD_DELETE
   return eventType === "SHRED_SUCCESS" ? "CRYPTO_SHREDDING_DEK_DELETE" : "DIRECT_DELETE_ROOT_ROW";
 }
 
+function isTerminalEventType(eventType: string): eventType is "SHRED_SUCCESS" | "USER_HARD_DELETED" {
+  return eventType === "SHRED_SUCCESS" || eventType === "USER_HARD_DELETED";
+}
+
+interface TerminalCertificateEnvelope {
+  payload: {
+    request_id: string;
+    subject_opaque_id: string;
+    event_type: "SHRED_SUCCESS" | "USER_HARD_DELETED";
+    method: "CRYPTO_SHREDDING_DEK_DELETE" | "DIRECT_DELETE_ROOT_ROW";
+    legal_framework: string;
+    shredded_at: string;
+    final_worm_hash: string;
+  };
+  signature: {
+    algorithm: string;
+    keyId: string;
+    signatureBase64: string;
+    publicKeySpkiBase64: string;
+  };
+}
+
 /**
  * Domain service for zero-PII control-plane orchestration.
  */
@@ -52,8 +74,26 @@ export class ControlPlaneService {
     };
   }
 
+  private buildTerminalCertificatePayload(
+    job: ErasureJobRow,
+    eventType: "SHRED_SUCCESS" | "USER_HARD_DELETED",
+    shreddedAt: Date,
+    finalWormHash: string
+  ): TerminalCertificateEnvelope["payload"] {
+    return {
+      request_id: job.id,
+      subject_opaque_id: job.subject_opaque_id,
+      event_type: eventType,
+      method: resolveCertificateMethod(eventType),
+      legal_framework: job.legal_framework,
+      shredded_at: shreddedAt.toISOString(),
+      final_worm_hash: finalWormHash,
+    };
+  }
+
   private async dispatchTerminalWebhook(
     webhookUrl: string,
+    webhookIdempotencyKey: string,
     payload: {
       request_id: string;
       subject_opaque_id: string;
@@ -85,6 +125,7 @@ export class ControlPlaneService {
         method: "POST",
         headers: {
           "content-type": "application/json",
+          "idempotency-key": webhookIdempotencyKey,
         },
         body: JSON.stringify(payload),
         signal: controller.signal,
@@ -160,6 +201,147 @@ export class ControlPlaneService {
 
     return (
       canonicalJsonStringify(existing.payload) === canonicalJsonStringify(this.buildOutboxPayload(input))
+    );
+  }
+
+  private async ensureTerminalCertificate(
+    job: ErasureJobRow,
+    eventType: "SHRED_SUCCESS" | "USER_HARD_DELETED",
+    shreddedAt: Date,
+    finalWormHash: string
+  ): Promise<TerminalCertificateEnvelope> {
+    const payload = this.buildTerminalCertificatePayload(job, eventType, shreddedAt, finalWormHash);
+    const existingCertificate = await this.repository.getCertificateByRequestId(job.id);
+    if (existingCertificate) {
+      if (canonicalJsonStringify(existingCertificate.payload) !== canonicalJsonStringify(payload)) {
+        fail({
+          code: "API_CERTIFICATE_INTEGRITY_CONFLICT",
+          title: "Stored certificate payload mismatch",
+          detail: `Certificate ${job.id} does not match the terminal WORM event being processed.`,
+          status: 409,
+          category: "integrity",
+          retryable: false,
+        });
+      }
+
+      return {
+        payload,
+        signature: {
+          algorithm: existingCertificate.algorithm,
+          keyId: existingCertificate.key_id,
+          signatureBase64: existingCertificate.signature_base64,
+          publicKeySpkiBase64: existingCertificate.public_key_spki_base64,
+        },
+      };
+    }
+
+    const signature = await this.signer.sign(payload);
+    const inserted = await this.repository.insertCertificate({
+      requestId: job.id,
+      subjectOpaqueId: job.subject_opaque_id,
+      method: payload.method,
+      legalFramework: job.legal_framework,
+      shreddedAt,
+      payload,
+      signatureBase64: signature.signatureBase64,
+      publicKeySpkiBase64: signature.publicKeySpkiBase64,
+      keyId: signature.keyId,
+      algorithm: signature.algorithm,
+    });
+
+    if (!inserted) {
+      const racedCertificate = await this.repository.getCertificateByRequestId(job.id);
+      if (!racedCertificate) {
+        fail({
+          code: "API_CERTIFICATE_INSERT_RACE",
+          title: "Certificate insert race failed",
+          detail: `Certificate ${job.id} conflicted during insert but no stored certificate could be reloaded.`,
+          status: 409,
+          category: "concurrency",
+          retryable: true,
+        });
+      }
+
+      if (canonicalJsonStringify(racedCertificate.payload) !== canonicalJsonStringify(payload)) {
+        fail({
+          code: "API_CERTIFICATE_INTEGRITY_CONFLICT",
+          title: "Stored certificate payload mismatch",
+          detail: `Certificate ${job.id} does not match the terminal WORM event being processed.`,
+          status: 409,
+          category: "integrity",
+          retryable: false,
+        });
+      }
+
+      return {
+        payload,
+        signature: {
+          algorithm: racedCertificate.algorithm,
+          keyId: racedCertificate.key_id,
+          signatureBase64: racedCertificate.signature_base64,
+          publicKeySpkiBase64: racedCertificate.public_key_spki_base64,
+        },
+      };
+    }
+
+    return {
+      payload,
+      signature: {
+        algorithm: signature.algorithm,
+        keyId: signature.keyId,
+        signatureBase64: signature.signatureBase64,
+        publicKeySpkiBase64: signature.publicKeySpkiBase64,
+      },
+    };
+  }
+
+  private async finalizeTerminalOutboxEvent(
+    job: ErasureJobRow,
+    input: WorkerOutboxEventInput,
+    now: Date
+  ): Promise<void> {
+    if (!isTerminalEventType(input.event_type)) {
+      return;
+    }
+
+    const shreddedAt = new Date(input.event_timestamp);
+    await this.repository.transitionJobFromOutbox({
+      jobId: input.request_id,
+      eventType: input.event_type,
+      now,
+      shreddedAt,
+    });
+
+    const certificate = await this.ensureTerminalCertificate(job, input.event_type, shreddedAt, input.current_hash);
+    if (!job.webhook_url) {
+      return;
+    }
+
+    await this.dispatchTerminalWebhook(
+      job.webhook_url,
+      `webhook:${job.id}:${certificate.payload.final_worm_hash}`,
+      {
+        request_id: job.id,
+        subject_opaque_id: job.subject_opaque_id,
+        event_type: input.event_type,
+        legal_framework: job.legal_framework,
+        shredded_at: shreddedAt.toISOString(),
+        certificate: {
+          request_id: job.id,
+          subject_opaque_id: job.subject_opaque_id,
+          event_type: input.event_type,
+          method: certificate.payload.method,
+          legal_framework: job.legal_framework,
+          shredded_at: shreddedAt.toISOString(),
+          final_worm_hash: certificate.payload.final_worm_hash,
+          signature: {
+            algorithm: certificate.signature.algorithm,
+            key_id: certificate.signature.keyId,
+            signature_base64: certificate.signature.signatureBase64,
+            public_key_spki_base64: certificate.signature.publicKeySpkiBase64,
+          },
+        },
+      }
     );
   }
 
@@ -351,22 +533,6 @@ export class ControlPlaneService {
    */
   async ingestWorkerOutbox(input: WorkerOutboxEventInput, clientId: string) {
     const now = this.now();
-    const existingEvent = await this.repository.getAuditEventByIdempotencyKey(input.idempotency_key);
-    if (existingEvent) {
-      if (this.isReplayEquivalent(existingEvent, input, clientId)) {
-        return { accepted: true as const, idempotent_replay: true as const };
-      }
-
-      fail({
-        code: "API_OUTBOX_IDEMPOTENCY_CONFLICT",
-        title: "Outbox idempotency conflict",
-        detail: `idempotency_key ${input.idempotency_key} already exists with a different event payload.`,
-        status: 409,
-        category: "integrity",
-        retryable: false,
-      });
-    }
-
     const job = await this.repository.getJobById(input.request_id);
     if (!job) {
       fail({
@@ -395,6 +561,26 @@ export class ControlPlaneService {
         code: "API_OUTBOX_SUBJECT_MISMATCH",
         title: "Subject mismatch",
         detail: `subject_opaque_id does not match request ${input.request_id}.`,
+        status: 409,
+        category: "integrity",
+        retryable: false,
+      });
+    }
+
+    const existingEvent = await this.repository.getAuditEventByIdempotencyKey(input.idempotency_key);
+    if (existingEvent) {
+      if (this.isReplayEquivalent(existingEvent, input, clientId)) {
+        if (isTerminalEventType(input.event_type)) {
+          await this.finalizeTerminalOutboxEvent(job, input, now);
+        }
+
+        return { accepted: true as const, idempotent_replay: true as const };
+      }
+
+      fail({
+        code: "API_OUTBOX_IDEMPOTENCY_CONFLICT",
+        title: "Outbox idempotency conflict",
+        detail: `idempotency_key ${input.idempotency_key} already exists with a different event payload.`,
         status: 409,
         category: "integrity",
         retryable: false,
@@ -451,6 +637,10 @@ export class ControlPlaneService {
     if (!inserted) {
       const racedEvent = await this.repository.getAuditEventByIdempotencyKey(input.idempotency_key);
       if (racedEvent && this.isReplayEquivalent(racedEvent, input, clientId)) {
+        if (isTerminalEventType(input.event_type)) {
+          await this.finalizeTerminalOutboxEvent(job, input, now);
+        }
+
         return { accepted: true as const, idempotent_replay: true as const };
       }
 
@@ -464,63 +654,8 @@ export class ControlPlaneService {
       });
     }
 
-    if (input.event_type === "SHRED_SUCCESS" || input.event_type === "USER_HARD_DELETED") {
-      const shreddedAt = new Date(input.event_timestamp);
-      const method = resolveCertificateMethod(input.event_type);
-      const certificatePayload = {
-        request_id: job.id,
-        subject_opaque_id: job.subject_opaque_id,
-        event_type: input.event_type,
-        method,
-        legal_framework: job.legal_framework,
-        shredded_at: shreddedAt.toISOString(),
-        final_worm_hash: input.current_hash,
-      };
-      const signature = await this.signer.sign(certificatePayload);
-
-      await this.repository.transitionJobFromOutbox({
-        jobId: input.request_id,
-        eventType: input.event_type,
-        now,
-        shreddedAt,
-      });
-      await this.repository.insertCertificate({
-        requestId: job.id,
-        subjectOpaqueId: job.subject_opaque_id,
-        method,
-        legalFramework: job.legal_framework,
-        shreddedAt,
-        payload: certificatePayload,
-        signatureBase64: signature.signatureBase64,
-        publicKeySpkiBase64: signature.publicKeySpkiBase64,
-        keyId: signature.keyId,
-        algorithm: signature.algorithm,
-      });
-
-      if (job.webhook_url) {
-        await this.dispatchTerminalWebhook(job.webhook_url, {
-          request_id: job.id,
-          subject_opaque_id: job.subject_opaque_id,
-          event_type: input.event_type,
-          legal_framework: job.legal_framework,
-          shredded_at: shreddedAt.toISOString(),
-          certificate: {
-            request_id: job.id,
-            subject_opaque_id: job.subject_opaque_id,
-            event_type: input.event_type,
-            method,
-            legal_framework: job.legal_framework,
-            shredded_at: shreddedAt.toISOString(),
-            final_worm_hash: input.current_hash,
-            signature: {
-              algorithm: signature.algorithm,
-              key_id: signature.keyId,
-              signature_base64: signature.signatureBase64,
-              public_key_spki_base64: signature.publicKeySpkiBase64,
-            },
-          },
-        });
-      }
+    if (isTerminalEventType(input.event_type)) {
+      await this.finalizeTerminalOutboxEvent(job, input, now);
     } else {
       await this.repository.transitionJobFromOutbox({
         jobId: input.request_id,

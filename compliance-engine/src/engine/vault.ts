@@ -35,6 +35,15 @@ interface SatelliteMutationResult {
   affectedRows: number;
 }
 
+async function yieldWorkerEventLoop(): Promise<void> {
+  if (typeof globalThis.Bun !== "undefined" && typeof globalThis.Bun.sleep === "function") {
+    await globalThis.Bun.sleep(0);
+    return;
+  }
+
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
 /**
  * Retention-rule evaluation inputs derived from worker config.
  */
@@ -245,9 +254,65 @@ async function hardDeleteSatelliteRows(
     }
 
     totalDeleted += deletedRows.length;
+    await yieldWorkerEventLoop();
   }
 
   return totalDeleted;
+}
+
+async function mutateSatelliteTarget(
+  tx: postgres.TransactionSql,
+  appSchema: string,
+  target: SatelliteTarget,
+  lockedRootRow: Record<string, unknown>,
+  hmacKey: Uint8Array,
+  tenantId?: string
+): Promise<SatelliteMutationResult> {
+  const lookupValue = normalizeRootRowValue(lockedRootRow[target.lookup_column]);
+  if (lookupValue === null) {
+    return {
+      table: `${appSchema}.${target.table}`,
+      action: target.action,
+      affectedRows: 0,
+    };
+  }
+
+  if (target.action === "redact") {
+    const newHmacValue = await generateHMAC(
+      `${appSchema}:${target.table}:${target.lookup_column}:${lookupValue}`,
+      Buffer.from(hmacKey).toString("base64")
+    );
+    const affectedRows = await redactSatelliteTable(
+      tx,
+      `${appSchema}.${target.table}`,
+      target.lookup_column,
+      lookupValue,
+      newHmacValue,
+      DEFAULT_SATELLITE_BATCH_SIZE,
+      tenantId
+    );
+
+    return {
+      table: `${appSchema}.${target.table}`,
+      action: target.action,
+      affectedRows,
+    };
+  }
+
+  const affectedRows = await hardDeleteSatelliteRows(
+    tx,
+    appSchema,
+    target.table,
+    target.lookup_column,
+    lookupValue,
+    tenantId
+  );
+
+  return {
+    table: `${appSchema}.${target.table}`,
+    action: target.action,
+    affectedRows,
+  };
 }
 
 async function mutateSatelliteTargets(
@@ -258,57 +323,22 @@ async function mutateSatelliteTargets(
   hmacKey: Uint8Array,
   tenantId?: string
 ): Promise<SatelliteMutationResult[]> {
-  const satelliteMutations: SatelliteMutationResult[] = [];
+  const settled = await Promise.allSettled(
+    rootContext.satelliteTargets.map(async (target) => {
+      const result = await mutateSatelliteTarget(tx, appSchema, target, lockedRootRow, hmacKey, tenantId);
+      await yieldWorkerEventLoop();
+      return result;
+    })
+  );
 
-  for (const target of rootContext.satelliteTargets) {
-    const lookupValue = normalizeRootRowValue(lockedRootRow[target.lookup_column]);
-    if (lookupValue === null) {
-      satelliteMutations.push({
-        table: `${appSchema}.${target.table}`,
-        action: target.action,
-        affectedRows: 0,
-      });
-      continue;
-    }
-
-    if (target.action === "redact") {
-      const newHmacValue = await generateHMAC(
-        `${appSchema}:${target.table}:${target.lookup_column}:${lookupValue}`,
-        Buffer.from(hmacKey).toString("base64")
-      );
-      const affectedRows = await redactSatelliteTable(
-        tx,
-        `${appSchema}.${target.table}`,
-        target.lookup_column,
-        lookupValue,
-        newHmacValue,
-        DEFAULT_SATELLITE_BATCH_SIZE,
-        tenantId
-      );
-      satelliteMutations.push({
-        table: `${appSchema}.${target.table}`,
-        action: target.action,
-        affectedRows,
-      });
-      continue;
-    }
-
-    const affectedRows = await hardDeleteSatelliteRows(
-      tx,
-      appSchema,
-      target.table,
-      target.lookup_column,
-      lookupValue,
-      tenantId
-    );
-    satelliteMutations.push({
-      table: `${appSchema}.${target.table}`,
-      action: target.action,
-      affectedRows,
-    });
+  const rejected = settled.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected"
+  );
+  if (rejected) {
+    throw rejected.reason;
   }
 
-  return satelliteMutations;
+  return settled.map((result) => (result as PromiseFulfilledResult<SatelliteMutationResult>).value);
 }
 
 async function resolveRetentionWindow(
@@ -317,6 +347,20 @@ async function resolveRetentionWindow(
   retentionYears: number,
   noticeWindowHours: number
 ): Promise<{ retentionExpiry: Date; notificationDueAt: Date }> {
+  if (typeof sql !== "function") {
+    const retentionExpiry = new Date(now);
+    retentionExpiry.setUTCFullYear(retentionExpiry.getUTCFullYear() + retentionYears);
+
+    const notificationDueAt = new Date(
+      Math.max(now.getTime(), retentionExpiry.getTime() - noticeWindowHours * 60 * 60 * 1000)
+    );
+
+    return {
+      retentionExpiry,
+      notificationDueAt,
+    };
+  }
+
   const [window] = await sql<{ retention_expiry: Date; notification_due_at: Date }[]>`
     SELECT
       ${now}::timestamptz + MAKE_INTERVAL(years := ${retentionYears}) AS retention_expiry,
@@ -480,14 +524,17 @@ export async function vaultUser(
       retention.retentionYears,
       noticeWindowHours
     );
-    const existingVault = await getVaultRecordByUserId(
-      sql,
-      engineSchema,
-      appSchema,
-      subjectId,
-      rootContext.rootTable,
-      tenantId
-    );
+    const existingVault =
+      typeof sql === "function"
+        ? await getVaultRecordByUserId(
+            sql,
+            engineSchema,
+            appSchema,
+            subjectId,
+            rootContext.rootTable,
+            tenantId
+          )
+        : null;
 
     return {
       action: "dry_run",
@@ -521,6 +568,8 @@ export async function vaultUser(
   try {
     try {
       return await sql.begin("isolation level repeatable read", async (tx) => {
+        await tx.unsafe("SET LOCAL lock_timeout = '5s'");
+
         const columnsToSelect = [
           rootContext.rootIdColumn,
           ...new Set([
