@@ -29,6 +29,9 @@ function validationHook(target: "json" | "header" | "param") {
 
 /**
  * Creates control-plane API routes.
+ *
+ * @param service - Domain service implementing request orchestration and state transitions.
+ * @returns Hono router mounted under `/api/v1`.
  */
 export function createControlPlaneRouter(service: ControlPlaneService) {
   const router = new Hono();

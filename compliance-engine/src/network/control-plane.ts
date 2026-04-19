@@ -77,6 +77,9 @@ const syncResponseSchema = z.union([
     .strict(),
 ]);
 
+/**
+ * HTTP endpoints and credentials required to communicate with the Control Plane.
+ */
 export interface ControlPlaneApiClientOptions {
   syncUrl: string;
   ackBaseUrl: string;
@@ -165,7 +168,11 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
 }
 
 /**
- * Builds a strict Control Plane client that validates sync payloads before they reach the worker.
+ * Builds a strict Control Plane client that validates response payloads before task execution.
+ *
+ * @param options - Control Plane endpoints, worker auth headers, outbox push transport, and timeout.
+ * @returns API client implementation consumed by `ComplianceWorker`.
+ * @throws {WorkerError} For transport failures, auth failures, or protocol/schema violations.
  */
 export function createControlPlaneApiClient(options: ControlPlaneApiClientOptions): ApiClient {
   const timeoutMs = options.timeoutMs ?? 10_000;

@@ -40,6 +40,17 @@ function buildShredDryRunPlan(
 
 /**
  * Destroys the DEK and replaces vaulted ciphertext with a non-PII sentinel.
+ *
+ * The function enforces fail-closed shredding semantics:
+ * 1. Retention must be fully elapsed.
+ * 2. Pre-erasure notice must be sent unless explicitly bypassed.
+ * 3. Key deletion and vault mutation happen atomically inside one repeatable-read transaction.
+ *
+ * @param sql - Postgres connection pool used for transactional shredding.
+ * @param userId - Numeric subject identifier from the root table.
+ * @param options - Shredding overrides such as schema/table, dry-run mode, and clock injection.
+ * @returns Structured shred result describing whether shredding executed, was skipped, or was simulated.
+ * @throws {WorkerError} When retention/notice preconditions fail or key/vault invariants are broken.
  */
 export async function shredUser(
   sql: postgres.Sql,

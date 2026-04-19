@@ -90,6 +90,13 @@ export class ControlPlaneRepository {
     private readonly taskLeaseSeconds: number
   ) {}
 
+  /**
+   * Upserts a worker client record and rotates its token hash atomically.
+   *
+   * @param name - Stable worker client name.
+   * @param workerApiKeyHash - SHA-256 digest of worker bearer token.
+   * @returns Persisted client row.
+   */
   async ensureClient(name: string, workerApiKeyHash: string): Promise<ClientRow> {
     const [row] = await this.sql<ClientRow[]>`
       INSERT INTO ${this.sql(this.schema)}.clients (name, worker_api_key_hash)
@@ -101,6 +108,12 @@ export class ControlPlaneRepository {
     return row!;
   }
 
+  /**
+   * Finds a registered worker client by name.
+   *
+   * @param name - Worker client name.
+   * @returns Matching client row or `null`.
+   */
   async getClientByName(name: string): Promise<ClientRow | null> {
     const [row] = await this.sql<ClientRow[]>`
       SELECT *
@@ -110,6 +123,12 @@ export class ControlPlaneRepository {
     return row ?? null;
   }
 
+  /**
+   * Fetches an erasure job by request id.
+   *
+   * @param jobId - Erasure job UUID.
+   * @returns Job row or `null`.
+   */
   async getJobById(jobId: string): Promise<ErasureJobRow | null> {
     const [job] = await this.sql<ErasureJobRow[]>`
       SELECT *
@@ -119,6 +138,12 @@ export class ControlPlaneRepository {
     return job ?? null;
   }
 
+  /**
+   * Fetches an erasure job by idempotency key.
+   *
+   * @param idempotencyKey - Request idempotency UUID.
+   * @returns Job row or `null`.
+   */
   async getJobByIdempotencyKey(idempotencyKey: string): Promise<ErasureJobRow | null> {
     const [job] = await this.sql<ErasureJobRow[]>`
       SELECT *
@@ -128,6 +153,12 @@ export class ControlPlaneRepository {
     return job ?? null;
   }
 
+  /**
+   * Fetches the earliest task associated with a job.
+   *
+   * @param jobId - Erasure job UUID.
+   * @returns Task row or `null`.
+   */
   async getTaskByJobId(jobId: string): Promise<TaskQueueRow | null> {
     const [task] = await this.sql<TaskQueueRow[]>`
       SELECT *
@@ -139,6 +170,12 @@ export class ControlPlaneRepository {
     return task ?? null;
   }
 
+  /**
+   * Creates an erasure job and initial `VAULT_USER` task in one transaction.
+   *
+   * @param input - Precomputed ids, normalized request payload, and timestamp.
+   * @returns Inserted job + task rows.
+   */
   async createJobAndQueueTask(input: {
     jobId: string;
     taskId: string;
@@ -216,6 +253,13 @@ export class ControlPlaneRepository {
     });
   }
 
+  /**
+   * Cancels a job only when it is still in `WAITING_COOLDOWN`.
+   *
+   * @param idempotencyKey - Request idempotency UUID.
+   * @param now - Update timestamp.
+   * @returns Cancelled job row or `null` if no eligible job was found.
+   */
   async cancelWaitingJobByIdempotencyKey(idempotencyKey: string, now: Date): Promise<ErasureJobRow | null> {
     const [job] = await this.sql<ErasureJobRow[]>`
       UPDATE ${this.sql(this.schema)}.erasure_jobs
@@ -228,6 +272,14 @@ export class ControlPlaneRepository {
     return job ?? null;
   }
 
+  /**
+   * Claims the next due task using `FOR UPDATE SKIP LOCKED` leasing semantics.
+   *
+   * @param clientId - Authenticated worker client id.
+   * @param workerClientName - Worker client name recorded in lease metadata.
+   * @param now - Lease anchor timestamp.
+   * @returns Leased task row or `null` when no due task is available.
+   */
   async claimNextTask(clientId: string, workerClientName: string, now: Date): Promise<TaskQueueRow | null> {
     return this.sql.begin(async (tx) => {
       const [candidate] = await tx<TaskQueueRow[]>`
@@ -272,6 +324,15 @@ export class ControlPlaneRepository {
     });
   }
 
+  /**
+   * Acknowledges task completion/failure and applies downstream job failure transition when required.
+   *
+   * @param taskId - Task UUID.
+   * @param status - Worker ack status.
+   * @param result - Worker result payload persisted for diagnostics.
+   * @param now - Completion timestamp.
+   * @returns Updated task row, existing terminal row, or `null` when task is missing.
+   */
   async ackTask(taskId: string, status: "completed" | "failed", result: unknown, now: Date): Promise<TaskQueueRow | null> {
     return this.sql.begin(async (tx) => {
       const [task] = await tx<TaskQueueRow[]>`
@@ -316,6 +377,9 @@ export class ControlPlaneRepository {
 
   /**
    * Reads the latest WORM hash pointer for a client in O(1) using the sequence index.
+   *
+   * @param clientId - Worker client id.
+   * @returns Current chain head hash or `null` for genesis state.
    */
   async getLatestAuditHash(clientId: string): Promise<string | null> {
     const [row] = await this.sql<{ current_hash: string }[]>`
@@ -328,6 +392,12 @@ export class ControlPlaneRepository {
     return row?.current_hash ?? null;
   }
 
+  /**
+   * Appends one audit ledger event with idempotent conflict handling.
+   *
+   * @param input - Event envelope and chain hashes.
+   * @returns `true` when inserted, `false` when conflict indicates replay.
+   */
   async insertAuditLedgerEvent(input: {
     clientId: string;
     idempotencyKey: string;
@@ -364,6 +434,9 @@ export class ControlPlaneRepository {
 
   /**
    * Fetches a previously ingested audit event by its global idempotency key.
+   *
+   * @param idempotencyKey - Worker idempotency key.
+   * @returns Matching audit event or `null`.
    */
   async getAuditEventByIdempotencyKey(idempotencyKey: string): Promise<AuditLedgerRow | null> {
     const [row] = await this.sql<AuditLedgerRow[]>`
@@ -374,6 +447,12 @@ export class ControlPlaneRepository {
     return row ?? null;
   }
 
+  /**
+   * Transitions erasure job state from worker outbox event semantics.
+   *
+   * @param input - Job id, event type, and timestamps.
+   * @returns Promise resolved after status transition update.
+   */
   async transitionJobFromOutbox(input: {
     jobId: string;
     eventType: OutboxEventType;
@@ -400,6 +479,12 @@ export class ControlPlaneRepository {
     `;
   }
 
+  /**
+   * Inserts a signed Certificate of Erasure idempotently.
+   *
+   * @param input - Persisted certificate payload and signature envelope.
+   * @returns `true` when inserted, `false` when certificate already exists.
+   */
   async insertCertificate(input: {
     requestId: string;
     subjectOpaqueId: string;
@@ -443,6 +528,12 @@ export class ControlPlaneRepository {
     return rows.length > 0;
   }
 
+  /**
+   * Fetches minted certificate by request id.
+   *
+   * @param requestId - Erasure request UUID.
+   * @returns Certificate row or `null`.
+   */
   async getCertificateByRequestId(requestId: string): Promise<CertificateRow | null> {
     const [certificate] = await this.sql<CertificateRow[]>`
       SELECT *

@@ -1,15 +1,7 @@
 /**
- * MODULE 4: THE NETWORK OUTBOX RELAY
+ * Transactional outbox relay with lease-based claiming and retry/dead-letter handling.
  *
- * Expert view:
- * A production outbox should never hold row locks while waiting on the network.
- * We therefore use short leasing transactions: claim a batch, process each
- * event outside the transaction, then ack/nack it in a follow-up transaction.
- *
- * Layman view:
- * The outbox is the worker's "send later" tray. We tag a few letters as being
- * handled by this worker, try to deliver them, and either mark them complete
- * or place them back in the tray with a later retry time.
+ * Network calls are always executed outside the claim transaction to avoid long-lived row locks.
  */
 
 import postgres from "postgres";
@@ -20,6 +12,9 @@ import { getLogger, logError } from "../observability/logger";
 
 export interface OutboxEvent extends OutboxRow {}
 
+/**
+ * Runtime controls for outbox claim and retry behavior.
+ */
 export interface ProcessOutboxOptions {
   engineSchema?: string;
   batchSize?: number;
@@ -29,6 +24,9 @@ export interface ProcessOutboxOptions {
   now?: Date;
 }
 
+/**
+ * Aggregated counters from one outbox processing cycle.
+ */
 export interface ProcessOutboxResult {
   claimed: number;
   processed: number;
@@ -36,6 +34,9 @@ export interface ProcessOutboxResult {
   deadLettered: number;
 }
 
+/**
+ * HTTP dispatcher configuration for pushing outbox events to the Control Plane.
+ */
 export interface FetchDispatcherOptions {
   url: string;
   token?: string;
@@ -77,14 +78,22 @@ function resolvePositiveInteger(value: number | undefined, fallback: number, lab
 }
 
 /**
- * Deterministic default dispatcher used by tests and local runs.
- * Production code should typically inject `createFetchDispatcher(...)`.
+ * No-op dispatcher used by tests/local execution when no HTTP transport is injected.
+ *
+ * @param event - Outbox event to "send".
+ * @returns Always `true` after logging.
  */
 export async function sendToAPI(event: OutboxEvent): Promise<boolean> {
   logger.info({ eventId: event.id, eventType: event.event_type }, "Outbox event synced");
   return true;
 }
 
+/**
+ * Creates an HTTP dispatcher that publishes worker outbox events to the Control Plane.
+ *
+ * @param options - Endpoint URL, auth headers, and timeout configuration.
+ * @returns Dispatcher function compatible with `processOutbox`.
+ */
 export function createFetchDispatcher(options: FetchDispatcherOptions) {
   const timeoutMs = options.timeoutMs ?? 10_000;
 
@@ -178,6 +187,13 @@ export function createFetchDispatcher(options: FetchDispatcherOptions) {
   };
 }
 
+/**
+ * Computes exponential retry delay capped at five minutes.
+ *
+ * @param attemptNumber - 1-based attempt count.
+ * @param baseBackoffMs - Initial backoff duration in milliseconds.
+ * @returns Retry delay in milliseconds.
+ */
 export function calculateRetryDelayMs(attemptNumber: number, baseBackoffMs: number = DEFAULT_BASE_BACKOFF_MS): number {
   return Math.min(baseBackoffMs * 2 ** Math.max(0, attemptNumber - 1), 5 * 60 * 1000);
 }
@@ -341,16 +357,15 @@ async function releaseOutboxLease(
 }
 
 /**
- * Layman Terms:
- * Grabs a stack of postcards from the "send later" tray. For each postcard, it drives 
- * to Headquarters (the API). If Headquarters signs for it, it throws the postcard away.
- * If the bridge is out, it puts the postcard back in the tray with a note saying 
- * "Try again tomorrow".
- * 
- * Technical Terms:
- * Claims a batch of due events via `claimOutboxBatch`, dispatches them using the injected
- * `syncFn` transport, and executes follow-up transactions to update their delivery
- * state with exponential retries and dead-letter handling.
+ * Claims due outbox events, dispatches them, and applies processed/retry/dead-letter state transitions.
+ *
+ * Fatal delivery failures are rethrown after lease release so the worker loop can fail closed.
+ *
+ * @param sql - Postgres pool owning the outbox table.
+ * @param syncFn - Event delivery function (usually HTTP dispatcher).
+ * @param options - Lease and retry tuning values.
+ * @returns Aggregate processing counters for the claimed batch.
+ * @throws {WorkerError} On fatal protocol/configuration errors or lease invariants.
  */
 export async function processOutbox(
   sql: postgres.Sql,

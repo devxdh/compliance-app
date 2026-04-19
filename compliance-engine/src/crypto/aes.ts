@@ -1,16 +1,7 @@
 /**
- * MODULE 1: THE CRYPTOGRAPHIC CORE (THE SAFE)
+ * AES-256-GCM helpers built on the Web Crypto API.
  *
- * Layman Terms:
- * Imagine a titanium safe (AES-256). But what if a hacker sneaks in, can't open it, 
- * but hits it with a hammer to ruin what's inside? "GCM" is like a magical tamper-evident seal. 
- * When you try to open the safe later, the seal checks if anyone scratched the outside. 
- * If it detects tampering, the safe jams and refuses to open.
- *
- * Technical Terms:
- * Implements AES-256-GCM. GCM (Galois/Counter Mode) provides Authenticated Encryption 
- * with Associated Data (AEAD), guaranteeing both Confidentiality and Integrity. 
- * It appends a 16-byte Auth Tag to the ciphertext to instantly fail decryption if tampered with.
+ * Payload layout is `IV(12 bytes) || ciphertext+tag`.
  */
 
 import { fail } from "../errors";
@@ -19,8 +10,12 @@ const IV_LENGTH = 12; // 96-bit IV is the industry standard for GCM.
 const KEY_LENGTH = 32; // 256-bit key for AES-256.
 
 /**
- * Encrypts raw text using a 32-byte Data Encryption Key (DEK).
- * Returns a single Buffer: [IV (12B) + Ciphertext (Variable) + Tag (16B)]
+ * Encrypts UTF-8 plaintext using AES-256-GCM.
+ *
+ * @param plaintext - Text payload to encrypt.
+ * @param rawKey - 32-byte symmetric key.
+ * @returns Combined buffer in `IV || ciphertext+tag` format.
+ * @throws {WorkerError} When key length is invalid.
  */
 export async function encryptGCM(plaintext: string, rawKey: Uint8Array): Promise<Uint8Array> {
   if (rawKey.length !== KEY_LENGTH) {
@@ -35,7 +30,6 @@ export async function encryptGCM(plaintext: string, rawKey: Uint8Array): Promise
 
   const crypto = globalThis.crypto;
 
-  // 1. Import the raw 32-byte key into a format the Web Crypto API understands.
   const key = await crypto.subtle.importKey(
     "raw",
     rawKey as any,
@@ -44,11 +38,8 @@ export async function encryptGCM(plaintext: string, rawKey: Uint8Array): Promise
     ["encrypt"]
   );
 
-  // 2. Generate a unique "Initialization Vector" (IV). 
-  // CRITICAL: NEVER REUSE AN IV WITH THE SAME KEY.
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
 
-  // 3. Encrypt the data. 
   const encodedData = new TextEncoder().encode(plaintext);
   const ciphertextBuffer = await crypto.subtle.encrypt(
     { name: "AES-GCM", iv },
@@ -56,8 +47,6 @@ export async function encryptGCM(plaintext: string, rawKey: Uint8Array): Promise
     encodedData
   );
 
-  // 4. Combine [IV + Ciphertext] into one result. 
-  // The "Auth Tag" is automatically appended at the end of the ciphertext in Web Crypto.
   const combined = new Uint8Array(iv.length + ciphertextBuffer.byteLength);
   combined.set(iv);
   combined.set(new Uint8Array(ciphertextBuffer), iv.length);
@@ -66,7 +55,12 @@ export async function encryptGCM(plaintext: string, rawKey: Uint8Array): Promise
 }
 
 /**
- * Decrypts a combined buffer [IV + Ciphertext + Tag] using the raw DEK.
+ * Decrypts a buffer in `IV || ciphertext+tag` format.
+ *
+ * @param combined - Combined encrypted payload produced by `encryptGCM`.
+ * @param rawKey - 32-byte symmetric key.
+ * @returns Decrypted UTF-8 plaintext.
+ * @throws {WorkerError} When key/ciphertext is invalid or integrity verification fails.
  */
 export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Promise<string> {
   if (rawKey.length !== KEY_LENGTH) {
@@ -79,7 +73,7 @@ export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Prom
     });
   }
 
-  if (combined.length < IV_LENGTH + 16) { // IV + Auth Tag (16 bytes)
+  if (combined.length < IV_LENGTH + 16) {
     fail({
       code: "DPDP_CRYPTO_INVALID_CIPHERTEXT",
       title: "Invalid ciphertext",
@@ -91,11 +85,9 @@ export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Prom
 
   const crypto = globalThis.crypto;
 
-  // 1. Extract the IV (first 12 bytes) and the actual ciphertext (everything else).
   const iv = combined.slice(0, IV_LENGTH);
   const ciphertext = combined.slice(IV_LENGTH);
 
-  // 2. Import the key.
   const key = await crypto.subtle.importKey(
     "raw",
     rawKey as any,
@@ -104,7 +96,6 @@ export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Prom
     ["decrypt"]
   );
 
-  // 3. Decrypt. If the data was tampered with, this will throw an error automatically.
   let decryptedBuffer: ArrayBuffer;
   try {
     decryptedBuffer = await crypto.subtle.decrypt(

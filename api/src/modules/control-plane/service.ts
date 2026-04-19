@@ -111,6 +111,10 @@ export class ControlPlaneService {
 
   /**
    * Registers an erasure request and queues the first worker task.
+   *
+   * @param input - Validated erasure ingestion payload.
+   * @returns Request/task identifiers plus idempotent replay indicator.
+   * @throws {ApiError} When idempotency key is reused with a different payload.
    */
   async createErasureRequest(input: CreateErasureRequestInput) {
     const existingJob = await this.repository.getJobByIdempotencyKey(input.idempotency_key);
@@ -172,6 +176,10 @@ export class ControlPlaneService {
 
   /**
    * Authenticates a worker using client name + bearer token hash matching.
+   *
+   * @param clientName - Worker client name from header.
+   * @param bearerToken - Raw bearer token.
+   * @returns Worker client id when credentials match, otherwise `null`.
    */
   async authorizeWorker(clientName: string, bearerToken: string): Promise<string | null> {
     const client = await this.repository.getClientByName(clientName);
@@ -185,6 +193,10 @@ export class ControlPlaneService {
 
   /**
    * Leases at most one pending task for the authenticated worker.
+   *
+   * @param clientName - Worker client name for lease attribution.
+   * @param clientId - Authenticated worker client id.
+   * @returns Pending task envelope or `pending: false`.
    */
   async syncWorker(clientName: string, clientId: string) {
     const task = await this.repository.claimNextTask(clientId, clientName, this.now());
@@ -205,6 +217,10 @@ export class ControlPlaneService {
 
   /**
    * Cancels a queued erasure request before the cooldown window completes.
+   *
+   * @param idempotencyKey - Request idempotency UUID.
+   * @returns Cancellation payload or `null` when request does not exist.
+   * @throws {ApiError} When request is already beyond cancellable states.
    */
   async cancelErasureRequest(idempotencyKey: string) {
     const existingJob = await this.repository.getJobByIdempotencyKey(idempotencyKey);
@@ -254,6 +270,10 @@ export class ControlPlaneService {
 
   /**
    * Finalizes an active worker task.
+   *
+   * @param taskId - Task UUID.
+   * @param input - Worker ack payload.
+   * @returns Updated task status payload or `null` when task is unknown.
    */
   async ackWorkerTask(taskId: string, input: WorkerAckInput) {
     const task = await this.repository.ackTask(taskId, input.status, input.result, this.now());
@@ -269,6 +289,11 @@ export class ControlPlaneService {
 
   /**
    * Ingests worker outbox events with chain validation and idempotent replay handling.
+   *
+   * @param input - Validated outbox event from worker.
+   * @param clientId - Authenticated worker client id.
+   * @returns Acceptance result with idempotent replay flag.
+   * @throws {ApiError} On chain mismatch, payload conflicts, or authorization violations.
    */
   async ingestWorkerOutbox(input: WorkerOutboxEventInput, clientId: string) {
     const now = this.now();
@@ -429,6 +454,9 @@ export class ControlPlaneService {
 
   /**
    * Fetches a minted Certificate of Erasure by request id.
+   *
+   * @param requestId - Erasure request UUID.
+   * @returns Certificate row or `null`.
    */
   async getCertificate(requestId: string) {
     return this.repository.getCertificateByRequestId(requestId);

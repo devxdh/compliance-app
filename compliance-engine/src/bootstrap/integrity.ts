@@ -2,6 +2,15 @@ import type postgres from "postgres";
 import { detectSchemaDrift } from "../db/drift";
 import { fail } from "../errors";
 
+/**
+ * Validates runtime schema fingerprint against the expected hash from worker configuration.
+ *
+ * @param sql - Postgres pool used to inspect `information_schema`.
+ * @param appSchema - Application schema expected by the worker.
+ * @param expectedSchemaHash - Expected SHA-256 schema fingerprint from config.
+ * @returns Detected schema hash when validation succeeds.
+ * @throws {WorkerError} When detected hash does not match expected hash.
+ */
 export async function assertSchemaIntegrity(
   sql: postgres.Sql,
   appSchema: string,

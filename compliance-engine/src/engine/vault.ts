@@ -36,6 +36,9 @@ interface SatelliteMutationResult {
   affectedRows: number;
 }
 
+/**
+ * Retention-rule evaluation inputs derived from worker config.
+ */
 export interface RetentionEvaluationConfig {
   default_retention_years: number;
   root_id_column: string;
@@ -43,6 +46,9 @@ export interface RetentionEvaluationConfig {
   app_schema: string;
 }
 
+/**
+ * Selected retention duration and rule name for chain-of-custody recording.
+ */
 export interface RetentionEvaluationResult {
   retentionYears: number;
   appliedRuleName: string;
@@ -343,6 +349,12 @@ function buildHardDeleteEventIdempotencyKey(
     : `hard-delete:${appSchema}:${rootTable}:${rootIdColumn}:${String(subjectId)}`;
 }
 
+/**
+ * Internal control-flow error used to force transaction rollback during `shadowMode`.
+ *
+ * The result payload is returned to the caller after rollback to prove execution correctness
+ * without persisting any mutation.
+ */
 export class ShadowModeRollback extends Error {
   readonly result: VaultUserResult;
 
@@ -361,6 +373,19 @@ function finalizeVaultResult(result: VaultUserResult, shadowMode: boolean): Vaul
   return result;
 }
 
+/**
+ * Evaluates configured evidence rules and returns the longest applicable retention window.
+ *
+ * Rules are checked against physical table evidence using safe identifier interpolation and
+ * optional tenant scoping. If no rule matches, the default retention policy is returned.
+ *
+ * @param tx - Active transaction used for consistency with surrounding vault flow.
+ * @param subjectId - Root subject identifier being vaulted.
+ * @param rules - Rule set and defaults parsed from worker config.
+ * @param tenantId - Optional tenant scope for multi-tenant datasets.
+ * @returns Highest retention duration and the rule name that produced it.
+ * @throws {WorkerError} When configured table or column identifiers are invalid.
+ */
 export async function evaluateRetention(
   tx: postgres.TransactionSql,
   subjectId: string | number,
@@ -398,7 +423,20 @@ export async function evaluateRetention(
 }
 
 /**
- * Vaults or hard-deletes a configured root entity under strict transactional guarantees.
+ * Vaults or hard-deletes a configured root entity under repeatable-read guarantees.
+ *
+ * Behavior:
+ * - If dependency graph is empty, root row is hard-deleted and `USER_HARD_DELETED` is emitted.
+ * - Otherwise root PII is encrypted, pseudonymized/masked/nullified, and vault metadata is persisted.
+ * - Satellite targets are processed in the same transaction for all-or-nothing mutation semantics.
+ * - When `shadowMode` is enabled, the full pipeline executes and then rolls back intentionally.
+ *
+ * @param sql - Primary Postgres pool used for transactional writes.
+ * @param subjectId - Root identifier (string or numeric) for the subject.
+ * @param secrets - Worker KEK/HMAC key material.
+ * @param options - Vault execution options (schema, graph, retention, tenancy, dry-run/shadow flags).
+ * @returns Vault execution result with action type, lifecycle timestamps, and outbox event classification.
+ * @throws {WorkerError} When validation, integrity, concurrency, or crypto preconditions fail.
  */
 export async function vaultUser(
   sql: postgres.Sql,

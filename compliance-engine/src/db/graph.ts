@@ -1,17 +1,5 @@
 /**
- * MODULE 2: THE GRAPH ENGINE (THE CRAWLER)
- * Standard: Recursive Common Table Expression (CTE)
- *
- * Expert view:
- * The worker needs a safe picture of which tables can point back to the root
- * `users` table. We keep this traversal inside PostgreSQL because the catalog
- * already knows the foreign-key graph, and walking it in SQL is dramatically
- * safer and faster than N round-trips from application code.
- *
- * Layman view:
- * Think of the database as a family tree. This module asks Postgres to tell us
- * which tables are children, grandchildren, and deeper descendants of `users`.
- * If the tree looks incomplete or too deep for our safety limit, we stop.
+ * Dependency-graph discovery using PostgreSQL catalog metadata and recursive CTE traversal.
  */
 
 import postgres from "postgres";
@@ -51,15 +39,17 @@ function resolveMaxDepth(input?: number): number {
 }
 
 /**
- * Layman Terms:
- * Triggers the magic map-making spell. If the database tells us the map is too big
- * (hits our max limit), we assume something is wrong (like a circular family tree)
- * and we crash, instead of deleting things blindly.
- * 
- * Technical Terms:
- * Returns the transitive foreign-key graph for a root table.
- * Safety note: We intentionally fail when the traversal touches the configured max depth.
- * That is conservative, but it avoids silently operating on a partial graph.
+ * Discovers the transitive foreign-key dependency graph for a root table.
+ *
+ * The recursive CTE tracks visited OIDs to prevent cyclic loops and fails closed when the configured
+ * depth limit is reached, avoiding partial graph mutation.
+ *
+ * @param sql - Postgres pool or active transaction.
+ * @param schema - Root table schema.
+ * @param rootTable - Root table name.
+ * @param options - Optional traversal controls.
+ * @returns Ordered dependency nodes containing table/column lineage metadata.
+ * @throws {WorkerError} When root table is missing, depth is invalid, or depth limit is reached.
  */
 export async function getDependencyGraph(
   sql: postgres.Sql | postgres.TransactionSql,

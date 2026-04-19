@@ -3,6 +3,11 @@ import { assertIdentifier } from "./identifiers";
 
 /**
  * Provisions the control-plane schema and tables.
+ *
+ * @param sql - Postgres connection pool.
+ * @param controlSchema - Target schema name for control-plane tables.
+ * @returns Promise resolved once all DDL has been applied.
+ * @throws {ApiError} When schema identifier validation fails.
  */
 export async function migrateApiSchema(sql: postgres.Sql, controlSchema: string = "dpdp_control") {
   const safeSchema = assertIdentifier(controlSchema, "control schema name");

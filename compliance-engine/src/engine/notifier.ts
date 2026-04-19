@@ -21,6 +21,11 @@ export interface MailMessage {
   idempotencyKey: string;
 }
 
+/**
+ * Mail transport abstraction used by the worker.
+ *
+ * Implementations must honor `idempotencyKey` to prevent duplicate notices during retries.
+ */
 export interface MockMailer {
   sendEmail(message: MailMessage): Promise<void>;
 }
@@ -213,7 +218,21 @@ async function clearNoticeLease(
 }
 
 /**
- * Sends the pre-erasure notice with a deterministic mail idempotency key so retries stay safe.
+ * Dispatches the pre-erasure notice for a vaulted subject.
+ *
+ * Execution model:
+ * - Reserves a short-lived notification lease on the vault row.
+ * - Decrypts vaulted PII in memory only.
+ * - Sends one deterministic idempotent email.
+ * - Emits `NOTIFICATION_SENT` to outbox only after successful mail delivery.
+ *
+ * @param sql - Postgres pool used for lease + state transitions.
+ * @param userId - Numeric root identifier.
+ * @param secrets - Worker cryptographic keys used for DEK unwrap/decrypt.
+ * @param mailer - Injected mail transport.
+ * @param options - Schema and runtime overrides (lease, dry-run, clock).
+ * @returns Notice dispatch result with lifecycle timestamps and outbox classification.
+ * @throws {WorkerError} When vault state is invalid, lease is lost, or crypto checks fail.
  */
 export async function dispatchPreErasureNotice(
   sql: postgres.Sql,

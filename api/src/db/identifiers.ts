@@ -4,6 +4,11 @@ const IDENTIFIER_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
 /**
  * Validates SQL identifiers used in dynamic schema/table references.
+ *
+ * @param name - Candidate SQL identifier.
+ * @param label - Human-readable label used in validation errors.
+ * @returns Unchanged identifier when valid.
+ * @throws {ApiError} When `name` contains disallowed characters.
  */
 export function assertIdentifier(name: string, label: string): string {
   if (!IDENTIFIER_PATTERN.test(name)) {

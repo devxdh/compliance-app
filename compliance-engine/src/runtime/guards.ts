@@ -14,6 +14,12 @@ function terminate(logger: Logger, error: unknown, code: number) {
   process.exit(code);
 }
 
+/**
+ * Registers process-level fatal guards for unhandled rejections and uncaught exceptions.
+ *
+ * @param logger - Root logger used to emit terminal failure diagnostics.
+ * @returns Void; installs listeners on `process`.
+ */
 export function registerProcessGuards(logger: Logger) {
   process.on("unhandledRejection", (reason) => {
     terminate(logger, asWorkerError(reason, {

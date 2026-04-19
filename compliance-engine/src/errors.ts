@@ -241,6 +241,9 @@ function buildCause(cause: unknown): Error | undefined {
   return new Error(typeof cause === "string" ? cause : JSON.stringify(cause));
 }
 
+/**
+ * Canonical worker error envelope mapped to RFC-7807-compatible problem details.
+ */
 export class WorkerError extends Error {
   readonly type: string;
   readonly code: WorkerErrorCode;
@@ -282,18 +285,43 @@ export class WorkerError extends Error {
   }
 }
 
+/**
+ * Type guard for `WorkerError`.
+ *
+ * @param error - Unknown thrown value.
+ * @returns `true` when value is a `WorkerError`.
+ */
 export function isWorkerError(error: unknown): error is WorkerError {
   return error instanceof WorkerError;
 }
 
+/**
+ * Constructs a normalized `WorkerError`.
+ *
+ * @param options - Error metadata and classification.
+ * @returns Worker error instance.
+ */
 export function workerError(options: WorkerErrorOptions): WorkerError {
   return new WorkerError(options);
 }
 
+/**
+ * Throws a normalized `WorkerError`.
+ *
+ * @param options - Error metadata and classification.
+ * @throws {WorkerError} Always.
+ */
 export function fail(options: WorkerErrorOptions): never {
   throw workerError(options);
 }
 
+/**
+ * Normalizes unknown errors into `WorkerError`, applying fallback defaults when needed.
+ *
+ * @param error - Unknown thrown value.
+ * @param fallback - Optional fallback fields used when inference is ambiguous.
+ * @returns Normalized worker error.
+ */
 export function asWorkerError(error: unknown, fallback: WorkerErrorFallback = {}): WorkerError {
   if (error instanceof WorkerError) {
     return error;
@@ -325,6 +353,13 @@ export function asWorkerError(error: unknown, fallback: WorkerErrorFallback = {}
   });
 }
 
+/**
+ * Serializes unknown errors into worker problem-details payload.
+ *
+ * @param error - Unknown thrown value.
+ * @param instance - Optional instance path/context identifier.
+ * @returns Structured worker problem details.
+ */
 export function serializeWorkerError(error: unknown, instance?: string): WorkerProblemDetails {
   return asWorkerError(error).toProblem(instance);
 }

@@ -12,6 +12,12 @@ export const DEFAULT_RETENTION_YEARS = 0;
 export const DEFAULT_GRAPH_MAX_DEPTH = 32;
 export const DESTROYED_PII_SENTINEL = Object.freeze({ v: 1, destroyed: true });
 
+/**
+ * Durable record shape stored in `${engineSchema}.pii_vault`.
+ *
+ * The row is treated as write-once for legal metadata and mutable for state-machine timestamps
+ * (`notification_sent_at`, `shredded_at`, lease fields).
+ */
 export interface VaultRecord {
   user_uuid_hash: string;
   request_id: string | null;
@@ -56,12 +62,24 @@ export interface OutboxRow {
   updated_at: Date;
 }
 
+/**
+ * SQL executor accepted by shared helpers.
+ *
+ * Supports both pool-level operations and transactional execution.
+ */
 export type SqlExecutor = postgres.Sql | postgres.TransactionSql;
 
 interface OutboxTailRow {
   current_hash: string | null;
 }
 
+/**
+ * Resolves and validates application/engine schema identifiers used by worker operations.
+ *
+ * @param input - Optional schema overrides from operation options.
+ * @returns Canonical schema names safe for dynamic identifier interpolation.
+ * @throws {WorkerError} When any schema name fails identifier validation.
+ */
 export function resolveSchemas(input: WorkerSchemas = {}) {
   return {
     appSchema: assertIdentifier(input.appSchema ?? DEFAULT_APP_SCHEMA, "application schema name"),
@@ -69,6 +87,13 @@ export function resolveSchemas(input: WorkerSchemas = {}) {
   };
 }
 
+/**
+ * Normalizes notice window configuration while enforcing the legal minimum of one hour.
+ *
+ * @param hours - Optional notice window in hours.
+ * @returns Validated notice window value.
+ * @throws {WorkerError} When `hours` is non-integer or less than 1.
+ */
 export function resolveNoticeWindowHours(hours?: number): number {
   if (hours === undefined) {
     return DEFAULT_NOTICE_WINDOW_HOURS;
@@ -87,6 +112,13 @@ export function resolveNoticeWindowHours(hours?: number): number {
   return hours;
 }
 
+/**
+ * Normalizes retention years with strict non-negative validation.
+ *
+ * @param years - Optional retention duration in years.
+ * @returns Validated retention duration.
+ * @throws {WorkerError} When `years` is non-integer or negative.
+ */
 export function resolveRetentionYears(years?: number): number {
   if (years === undefined) {
     return DEFAULT_RETENTION_YEARS;
@@ -105,6 +137,13 @@ export function resolveRetentionYears(years?: number): number {
   return years;
 }
 
+/**
+ * Normalizes dependency graph traversal depth and enforces a positive integer bound.
+ *
+ * @param depth - Optional graph traversal depth.
+ * @returns Validated depth used by graph discovery.
+ * @throws {WorkerError} When `depth` is non-integer or less than 1.
+ */
 export function resolveGraphMaxDepth(depth?: number): number {
   if (depth === undefined) {
     return DEFAULT_GRAPH_MAX_DEPTH;
@@ -123,6 +162,15 @@ export function resolveGraphMaxDepth(depth?: number): number {
   return depth;
 }
 
+/**
+ * Validates worker cryptographic material before any vaulting operation begins.
+ *
+ * `hmacKey` falls back to `kek` when not provided, preserving deterministic pseudonymization.
+ *
+ * @param secrets - Worker key material loaded from config/env.
+ * @returns Normalized key pair (`kek`, `hmacKey`) safe for downstream crypto helpers.
+ * @throws {WorkerError} When KEK length is not 32 bytes or HMAC key is empty.
+ */
 export function assertWorkerSecrets(secrets: WorkerSecrets): { kek: Uint8Array; hmacKey: Uint8Array } {
   if (secrets.kek.length !== 32) {
     fail({
@@ -153,6 +201,14 @@ export function assertWorkerSecrets(secrets: WorkerSecrets): { kek: Uint8Array; 
   };
 }
 
+/**
+ * Computes retention and pre-erasure notice boundaries using UTC arithmetic.
+ *
+ * @param now - Evaluation anchor timestamp.
+ * @param retentionYears - Legal retention duration in years.
+ * @param noticeWindowHours - Notice lead-time in hours before retention expiry.
+ * @returns `retentionExpiry` and `notificationDueAt` timestamps.
+ */
 export function calculateRetentionWindow(now: Date, retentionYears: number, noticeWindowHours: number) {
   const retentionExpiry = new Date(now);
   retentionExpiry.setUTCFullYear(retentionExpiry.getUTCFullYear() + retentionYears);
@@ -167,6 +223,16 @@ export function calculateRetentionWindow(now: Date, retentionYears: number, noti
   };
 }
 
+/**
+ * Produces a deterministic subject hash used as the worker's irreversible lookup key.
+ *
+ * @param rootId - Subject identifier in source schema.
+ * @param appSchema - Source schema name.
+ * @param rootTable - Source root table name.
+ * @param hmacKey - HMAC key bytes.
+ * @param tenantId - Optional tenant discriminator.
+ * @returns Stable HMAC-SHA256 hex digest.
+ */
 export async function createUserHash(
   rootId: string | number,
   appSchema: string,
@@ -180,6 +246,15 @@ export async function createUserHash(
   );
 }
 
+/**
+ * Derives an irreversible synthetic email for downstream systems that still require an address-shaped value.
+ *
+ * @param userId - Source subject identifier.
+ * @param email - Original email value from root payload.
+ * @param salt - Per-row salt stored in vault metadata.
+ * @param hmacKey - HMAC key bytes.
+ * @returns Pseudonymous `dpdp_...@dpdp.invalid` address.
+ */
 export async function createPseudonym(
   userId: string | number,
   email: string,
@@ -190,10 +265,29 @@ export async function createPseudonym(
   return `dpdp_${digest.slice(0, 24)}@dpdp.invalid`;
 }
 
+/**
+ * Builds the parameterized SQL statement used by `getVaultRecordByUserId`.
+ *
+ * @param engineSchema - Worker engine schema.
+ * @returns SQL text with positional parameters for root identity lookup.
+ */
 export function buildUserLookupSql(engineSchema: string): string {
   return `SELECT * FROM ${quoteQualifiedIdentifier(engineSchema, "pii_vault")} WHERE root_schema = $1 AND root_table = $2 AND root_id = $3 AND tenant_id = $4`;
 }
 
+/**
+ * Fetches a vault row by root identity tuple.
+ *
+ * Lookup uses `(root_schema, root_table, root_id, tenant_id)` to avoid cross-tenant collisions.
+ *
+ * @param sql - Postgres pool or transaction.
+ * @param engineSchema - Worker engine schema.
+ * @param appSchema - Source application schema.
+ * @param userId - Source root identifier.
+ * @param rootTable - Source root table name.
+ * @param tenantId - Optional tenant discriminator.
+ * @returns Matching vault row or `null` when not yet vaulted.
+ */
 export async function getVaultRecordByUserId(
   sql: SqlExecutor,
   engineSchema: string,
@@ -211,6 +305,22 @@ export async function getVaultRecordByUserId(
   return rows[0] ?? null;
 }
 
+/**
+ * Enqueues a tamper-evident outbox event inside the current transaction scope.
+ *
+ * The function is idempotent by `idempotency_key` and serializes chain head updates with an advisory
+ * transaction lock, keeping hash-chain append complexity O(1).
+ *
+ * @param sql - Postgres pool or transaction.
+ * @param engineSchema - Worker engine schema.
+ * @param userHash - Subject hash associated with the event.
+ * @param eventType - Outbox event type.
+ * @param payload - JSON-serializable event payload.
+ * @param idempotencyKey - Global idempotency key for replay safety.
+ * @param now - Event creation timestamp.
+ * @returns Existing or newly inserted outbox row.
+ * @throws {WorkerError} When payload is non-serializable or insert invariants are violated.
+ */
 export async function enqueueOutboxEvent(
   sql: SqlExecutor,
   engineSchema: string,
@@ -326,6 +436,15 @@ export async function enqueueOutboxEvent(
   return stored;
 }
 
+/**
+ * Replaces vaulted ciphertext with a non-PII sentinel and marks the vault as shredded.
+ *
+ * @param sql - Postgres pool or transaction.
+ * @param engineSchema - Worker engine schema.
+ * @param userHash - Subject hash key in `pii_vault`.
+ * @param shreddedAt - Timestamp to persist as `shredded_at`.
+ * @returns Promise that resolves when the vault row has been updated.
+ */
 export async function markVaultDestroyed(
   sql: SqlExecutor,
   engineSchema: string,

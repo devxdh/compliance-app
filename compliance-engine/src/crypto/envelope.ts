@@ -1,18 +1,5 @@
 /**
- * MODULE 1.1: ENVELOPE ENCRYPTION (THE VAULT)
- * 
- * Layman Terms:
- * The Master Safe. Imagine millions of titanium safes. If you store the keys next to them, 
- * a thief gets everything. Instead, you put all the millions of smaller keys inside one Master Safe. 
- * The combination to the Master Safe is in your brain. If hackers steal the warehouse (database), 
- * they just get locked safes and locked keys. Because the Master Combination is in your brain 
- * (server RAM), they get nothing.
- *
- * Technical Terms:
- * Implements the Two-Tier KEK/DEK Architecture.
- * KEK (Key Encrypting Key) lives only in RAM (via Env Variables).
- * DEK (Data Encrypting Key) is a unique per-user key generated and then encrypted by the KEK 
- * before persistence. This isolates symmetric keys from the database, enabling $O(1)$ crypto-shredding.
+ * Envelope-encryption helpers for KEK/DEK key management.
  */
 
 import { encryptGCM, decryptGCM } from "./aes";
@@ -20,7 +7,9 @@ import { encryptGCM, decryptGCM } from "./aes";
 const KEY_SIZE = 32; // 256-bit keys
 
 /**
- * Generates a random, cryptographically secure 32-byte key (DEK).
+ * Generates a new random 32-byte data-encryption key.
+ *
+ * @returns Cryptographically secure DEK bytes.
  */
 export function generateDEK(): Uint8Array {
   const crypto = globalThis.crypto;
@@ -28,19 +17,26 @@ export function generateDEK(): Uint8Array {
 }
 
 /**
- * Wraps (encrypts) a Data Encryption Key using the Master KEK.
+ * Wraps a DEK with the worker KEK.
+ *
+ * @param dek - Plain DEK bytes.
+ * @param kek - 32-byte KEK bytes.
+ * @returns Encrypted DEK blob.
  */
 export async function wrapKey(dek: Uint8Array, kek: Uint8Array): Promise<Uint8Array> {
-  // We reuse our AES-GCM module to encrypt the key itself.
   const encryptedKey = await encryptGCM(
-    Buffer.from(dek).toString("base64"), // Convert DEK to base64 for reliable string handling
+    Buffer.from(dek).toString("base64"),
     kek
   );
   return encryptedKey;
 }
 
 /**
- * Unwraps (decrypts) a Data Encryption Key using the Master KEK.
+ * Unwraps a previously wrapped DEK with the worker KEK.
+ *
+ * @param wrappedKey - Encrypted DEK blob.
+ * @param kek - 32-byte KEK bytes.
+ * @returns Plain DEK bytes.
  */
 export async function unwrapKey(wrappedKey: Uint8Array, kek: Uint8Array): Promise<Uint8Array> {
   const decryptedBase64 = await decryptGCM(wrappedKey, kek);

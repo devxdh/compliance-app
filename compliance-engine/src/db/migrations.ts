@@ -1,18 +1,7 @@
 /**
- * Layman Terms:
- * Building the Security Room. Before the guard can work, they build a locked, private 
- * security room inside the main building. In this room, they build three things:
- * 1. The Vault (where names and emails are locked).
- * 2. The Key Cabinet (where physical keys to the vaults are stored).
- * 3. The Mailroom Outbox (a tray for notes to the mailman).
+ * Provisions the worker engine schema (`pii_vault`, `user_keys`, `outbox`) and supporting indexes.
  *
- * Technical Terms:
- * Provisions the internal state schema (`dpdp_engine`).
- * Creates `pii_vault` for durable state machine timestamps and encrypted PII.
- * Creates `user_keys` with `ON DELETE CASCADE` attached to the vault to ensure 
- * foreign-key-based crypto-shredding capability. 
- * Creates `outbox` for the Transactional Outbox pattern, with indexes optimized 
- * for queue polling (retries and leases).
+ * The migration is idempotent and safe to execute on every boot.
  */
 
 import postgres from "postgres";
@@ -21,6 +10,14 @@ import { getLogger } from "../observability/logger";
 
 const logger = getLogger({ component: "migrations" });
 
+/**
+ * Applies worker schema migrations for vaulting, shredding, notification, and outbox processing.
+ *
+ * @param sql - Postgres pool connection.
+ * @param engineSchema - Target worker schema name.
+ * @returns Promise resolved once all DDL has been applied.
+ * @throws {WorkerError} When schema identifier validation fails.
+ */
 export async function runMigrations(sql: postgres.Sql, engineSchema: string = "dpdp_engine") {
   const safeEngineSchema = assertIdentifier(engineSchema, "engine schema name");
 

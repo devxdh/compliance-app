@@ -17,6 +17,9 @@ export type ApiEnv = z.infer<typeof envSchema>;
 
 /**
  * Parses and validates API environment variables.
+ *
+ * @param env - Raw environment map (defaults to `process.env`).
+ * @returns Strongly typed API runtime configuration.
  */
 export function readApiEnv(env: Record<string, string | undefined> = process.env): ApiEnv {
   return envSchema.parse(env);

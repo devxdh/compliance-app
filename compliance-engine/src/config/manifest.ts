@@ -7,6 +7,13 @@ export interface WorkerManifest {
   expectedSchemaHash: string;
 }
 
+/**
+ * Reads `compliance.worker.yml` and extracts the expected schema fingerprint used at boot.
+ *
+ * @param manifestPath - Path to worker YAML manifest.
+ * @returns Manifest subset currently required during integrity bootstrap.
+ * @throws {WorkerError} When `integrity.expected_schema_hash` is missing or malformed.
+ */
 export async function readWorkerManifest(
   manifestPath: string | URL = new URL("../compliance.worker.yml", import.meta.url)
 ): Promise<WorkerManifest> {

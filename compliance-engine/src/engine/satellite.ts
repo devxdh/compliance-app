@@ -25,6 +25,22 @@ function parseQualifiedTableName(tableName: string) {
   };
 }
 
+/**
+ * Redacts satellite table rows in cursor-sized batches using `FOR UPDATE SKIP LOCKED`.
+ *
+ * The function is designed for large tables and concurrent workers:
+ * each iteration locks and updates only one batch, then continues until no rows remain.
+ *
+ * @param tx - Active worker transaction.
+ * @param tableName - Qualified table name in `schema.table` form.
+ * @param lookupColumn - Column used to locate rows that reference the root subject.
+ * @param lookupValue - Value to match in `lookupColumn`.
+ * @param newHmacValue - Replacement value written during redaction.
+ * @param batchSize - Maximum rows processed per loop iteration.
+ * @param tenantId - Optional tenant discriminator.
+ * @returns Total number of rows redacted.
+ * @throws {WorkerError} When identifiers are invalid or batch sizing is unsafe.
+ */
 export async function redactSatelliteTable(
   tx: postgres.TransactionSql,
   tableName: string,

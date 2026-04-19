@@ -10,6 +10,16 @@ interface SchemaColumnRow {
 
 export type Sql = postgres.Sql | postgres.TransactionSql;
 
+/**
+ * Computes a deterministic SHA-256 fingerprint of the live application schema.
+ *
+ * The signature is built from ordered `table_name + column_name + data_type` tuples.
+ *
+ * @param sql - Postgres pool or transaction used for metadata query.
+ * @param appSchema - Application schema to fingerprint.
+ * @returns Hex-encoded SHA-256 schema hash.
+ * @throws {WorkerError} When `appSchema` is not a safe SQL identifier.
+ */
 export async function detectSchemaDrift(sql: Sql, appSchema: string): Promise<string> {
   const safeAppSchema = assertIdentifier(appSchema, "application schema name");
 

@@ -8,6 +8,9 @@ export const erasureTriggerSourceSchema = z.enum([
   "ADMIN_PURGE",
 ]);
 
+/**
+ * Lifecycle states of an erasure request managed by the Control Plane.
+ */
 export const erasureRequestStatusSchema = z.enum([
   "WAITING_COOLDOWN",
   "EXECUTING",
@@ -25,6 +28,9 @@ export const outboxEventTypeSchema = z.enum([
   "USER_HARD_DELETED",
 ]);
 
+/**
+ * Enterprise ingestion schema for `POST /api/v1/erasure-requests`.
+ */
 export const createErasureRequestSchema = z
   .object({
     subject_opaque_id: z.string().min(1),
@@ -40,6 +46,9 @@ export const createErasureRequestSchema = z
   })
   .strict();
 
+/**
+ * Worker acknowledgement payload for task completion/failure.
+ */
 export const workerAckSchema = z
   .object({
     status: z.enum(["completed", "failed"]),
@@ -47,6 +56,9 @@ export const workerAckSchema = z
   })
   .strict();
 
+/**
+ * Worker outbox envelope validated before WORM ledger ingestion.
+ */
 export const workerOutboxEventSchema = z
   .object({
     idempotency_key: z.string().min(1),

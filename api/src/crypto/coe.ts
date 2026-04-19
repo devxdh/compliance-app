@@ -9,6 +9,9 @@ export interface CoeSignature {
   publicKeySpkiBase64: string;
 }
 
+/**
+ * Certificate signer abstraction used when minting Certificates of Erasure.
+ */
 export interface CoeSigner {
   sign(payload: unknown): Promise<CoeSignature>;
 }
@@ -27,6 +30,13 @@ function toBase64(input: ArrayBuffer | Uint8Array): string {
 
 /**
  * Creates an Ed25519 certificate signer using Web Crypto APIs.
+ *
+ * If private/public key material is not provided, an ephemeral keypair is generated.
+ *
+ * @param keyId - Stable key identifier embedded in signatures.
+ * @param options - Optional PKCS8 private key + SPKI public key (base64).
+ * @returns Signer capable of producing CoE signatures.
+ * @throws {ApiError} When private key is provided without corresponding public key.
  */
 export async function createEd25519Signer(
   keyId: string,
@@ -83,6 +93,11 @@ export async function createEd25519Signer(
 
 /**
  * Verifies an Ed25519 signature for a JSON payload.
+ *
+ * @param publicKeySpkiBase64 - Public key in base64-encoded SPKI format.
+ * @param signatureBase64 - Signature in base64 format.
+ * @param payload - Canonical JSON payload that was signed.
+ * @returns `true` when signature verification succeeds.
  */
 export async function verifyEd25519Signature(
   publicKeySpkiBase64: string,

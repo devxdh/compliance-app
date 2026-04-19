@@ -1,16 +1,25 @@
 import type postgres from "postgres";
 import type { RetentionRule, RootPiiColumns, SatelliteTarget } from "../config/worker";
 
+/**
+ * Cryptographic material required by worker mutation pipelines.
+ */
 export interface WorkerSecrets {
   kek: Uint8Array;
   hmacKey?: Uint8Array;
 }
 
+/**
+ * Schema overrides for multi-tenant or non-default deployments.
+ */
 export interface WorkerSchemas {
   appSchema?: string;
   engineSchema?: string;
 }
 
+/**
+ * Common runtime controls for worker operations.
+ */
 export interface WorkerTimingOptions {
   now?: Date;
   defaultRetentionYears?: number;
@@ -19,6 +28,9 @@ export interface WorkerTimingOptions {
   dryRun?: boolean;
 }
 
+/**
+ * Human-readable execution plan returned during dry-run mode.
+ */
 export interface DryRunPlan {
   mode: "dry-run";
   summary: string;
@@ -27,6 +39,9 @@ export interface DryRunPlan {
   sqlSteps: string[];
 }
 
+/**
+ * Vault operation options controlling root mutation, retention logic, and transport metadata.
+ */
 export interface VaultUserOptions extends WorkerSchemas, WorkerTimingOptions {
   rootTable?: string;
   rootIdColumn?: string;
@@ -44,21 +59,33 @@ export interface VaultUserOptions extends WorkerSchemas, WorkerTimingOptions {
   sqlReplica?: postgres.Sql;
 }
 
+/**
+ * Notice dispatch options.
+ */
 export interface DispatchNoticeOptions extends WorkerSchemas, WorkerTimingOptions {
   rootTable?: string;
   notificationLeaseSeconds?: number;
 }
 
+/**
+ * Crypto-shred operation options.
+ */
 export interface ShredUserOptions extends WorkerSchemas, WorkerTimingOptions {
   rootTable?: string;
   requireNotification?: boolean;
 }
 
+/**
+ * Base result fields shared by all worker operations.
+ */
 export interface WorkerOperationResult {
   userHash: string | null;
   dryRun: boolean;
 }
 
+/**
+ * Result envelope for vault/hard-delete operations.
+ */
 export interface VaultUserResult extends WorkerOperationResult {
   action:
     | "vaulted"
@@ -76,6 +103,9 @@ export interface VaultUserResult extends WorkerOperationResult {
   plan?: DryRunPlan;
 }
 
+/**
+ * Result envelope for pre-erasure notice dispatch.
+ */
 export interface DispatchNoticeResult extends WorkerOperationResult {
   action: "sent" | "already_sent" | "not_due" | "dry_run";
   retentionExpiry: string | null;
@@ -85,6 +115,9 @@ export interface DispatchNoticeResult extends WorkerOperationResult {
   plan?: DryRunPlan;
 }
 
+/**
+ * Result envelope for crypto-shredding.
+ */
 export interface ShredUserResult extends WorkerOperationResult {
   action: "shredded" | "already_shredded" | "dry_run";
   shreddedAt: string | null;

@@ -28,6 +28,13 @@ export interface LoggerBindings {
   [key: string]: unknown;
 }
 
+/**
+ * Creates a Pino logger configured for control-plane redaction and structured API errors.
+ *
+ * @param bindings - Optional static bindings.
+ * @param destination - Optional destination stream.
+ * @returns Configured logger instance.
+ */
 export function createApiLogger(bindings: LoggerBindings = {}, destination?: DestinationStream): Logger {
   const instance = pino(
     {
@@ -57,10 +64,25 @@ export function createApiLogger(bindings: LoggerBindings = {}, destination?: Des
 
 export const logger = createApiLogger();
 
+/**
+ * Returns a child logger enriched with request/module context.
+ *
+ * @param bindings - Context fields to bind.
+ * @returns Child logger instance.
+ */
 export function getLogger(bindings: LoggerBindings): Logger {
   return logger.child(bindings);
 }
 
+/**
+ * Logs and normalizes unknown errors using the API error envelope.
+ *
+ * @param loggerInstance - Logger to emit to.
+ * @param error - Unknown thrown value.
+ * @param message - Message text.
+ * @param bindings - Additional structured context.
+ * @returns Normalized `ApiError`.
+ */
 export function logError(loggerInstance: Logger, error: unknown, message: string, bindings: LoggerBindings = {}) {
   const normalized = asApiError(error);
   const level = normalized.fatal ? "fatal" : normalized.retryable ? "warn" : normalized.status >= 500 ? "error" : "warn";

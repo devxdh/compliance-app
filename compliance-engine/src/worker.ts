@@ -15,6 +15,9 @@ import { getLogger, logError } from "./observability/logger";
 
 const logger = getLogger({ component: "worker" });
 
+/**
+ * Normalized task payload accepted from Control Plane.
+ */
 export interface WorkerTaskPayload {
   request_id?: string;
   subject_opaque_id?: string;
@@ -32,12 +35,18 @@ export interface WorkerTaskPayload {
   shadowMode?: boolean;
 }
 
+/**
+ * Leased task envelope returned by Control Plane sync.
+ */
 export interface WorkerTask {
   id: string;
   task_type: "VAULT_USER" | "NOTIFY_USER" | "SHRED_USER" | string;
   payload: WorkerTaskPayload;
 }
 
+/**
+ * Control Plane sync response shape.
+ */
 export interface SyncTaskResponse {
   pending: boolean;
   task?: WorkerTask;
@@ -45,18 +54,27 @@ export interface SyncTaskResponse {
 
 export type TaskExecutionResult = VaultUserResult | DispatchNoticeResult | ShredUserResult;
 
+/**
+ * Failed-task acknowledgement payload.
+ */
 export interface TaskFailureResult {
   error: WorkerProblemDetails;
 }
 
 export type TaskAckPayload = TaskExecutionResult | TaskFailureResult;
 
+/**
+ * Network contract required by the worker loop.
+ */
 export interface ApiClient {
   syncTask(): Promise<SyncTaskResponse>;
   ackTask(taskId: string, status: "completed" | "failed", result: TaskAckPayload): Promise<boolean>;
   pushOutboxEvent(event: OutboxEvent): Promise<boolean>;
 }
 
+/**
+ * Dependencies required to construct the compliance worker.
+ */
 export interface ComplianceWorkerOptions {
   sql: postgres.Sql;
   sqlReplica?: postgres.Sql;
@@ -109,7 +127,7 @@ async function acknowledgeTask(
 }
 
 /**
- * Orchestrates validated tasks from the Control Plane and keeps failure handling fail-closed.
+ * Orchestrates Control Plane tasks and enforces fail-closed execution semantics.
  */
 export class ComplianceWorker {
   private readonly sql: postgres.Sql;
@@ -192,7 +210,12 @@ export class ComplianceWorker {
   }
 
   /**
-   * Processes one task. Retryable and fatal errors are rethrown so the lease can recover safely.
+   * Processes at most one leased task from the Control Plane.
+   *
+   * Retryable/fatal errors are rethrown to preserve lease recovery behavior in the caller loop.
+   *
+   * @returns `true` when a task was claimed (completed or failed-ack), `false` when no task was pending.
+   * @throws {WorkerError} On retryable/fatal execution failures.
    */
   async processNextTask(): Promise<boolean> {
     const { pending, task } = await this.apiClient.syncTask();
@@ -227,7 +250,10 @@ export class ComplianceWorker {
   }
 
   /**
-   * Flushes the local outbox through the injected Control Plane dispatcher.
+   * Flushes the local transactional outbox to the Control Plane endpoint.
+   *
+   * @returns Promise resolved after one outbox processing pass.
+   * @throws {WorkerError} When outbox processing detects fatal delivery/protocol errors.
    */
   async flushOutbox(): Promise<void> {
     await processOutbox(this.sql, async (event) => this.apiClient.pushOutboxEvent(event), {

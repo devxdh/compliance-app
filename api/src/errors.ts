@@ -84,6 +84,9 @@ function isProblem(value: unknown): value is ApiProblemDetails {
   return isRecord(value) && typeof value.code === "string" && typeof value.detail === "string";
 }
 
+/**
+ * Canonical API error envelope mapped to RFC-7807-compatible problem details.
+ */
 export class ApiError extends Error {
   readonly type: string;
   readonly title: string;
@@ -128,14 +131,33 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Constructs an `ApiError` from explicit options.
+ *
+ * @param options - Error metadata and HTTP semantics.
+ * @returns API error instance.
+ */
 export function apiError(options: ApiErrorOptions): ApiError {
   return new ApiError(options);
 }
 
+/**
+ * Throws a normalized `ApiError`.
+ *
+ * @param options - Error metadata and HTTP semantics.
+ * @throws {ApiError} Always.
+ */
 export function fail(options: ApiErrorOptions): never {
   throw apiError(options);
 }
 
+/**
+ * Normalizes unknown thrown values into `ApiError`.
+ *
+ * @param error - Unknown thrown value.
+ * @param fallback - Optional fallback defaults when type inference is insufficient.
+ * @returns Normalized API error.
+ */
 export function asApiError(error: unknown, fallback: ApiErrorFallback = {}): ApiError {
   if (error instanceof ApiError) {
     return error;
@@ -199,6 +221,13 @@ export function asApiError(error: unknown, fallback: ApiErrorFallback = {}): Api
   });
 }
 
+/**
+ * Serializes unknown errors into API problem-details payload.
+ *
+ * @param error - Unknown thrown value.
+ * @param instance - Optional request path/context identifier.
+ * @returns Structured API problem details.
+ */
 export function serializeApiError(error: unknown, instance?: string): ApiProblemDetails {
   return asApiError(error).toProblem(instance);
 }

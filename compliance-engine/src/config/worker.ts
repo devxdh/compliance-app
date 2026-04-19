@@ -304,6 +304,11 @@ function normalizeWorkerYaml(config: WorkerYamlConfig): WorkerYamlConfig {
 
 /**
  * Reads `compliance.worker.yml`, validates it strictly, and resolves runtime cryptographic secrets.
+ *
+ * @param env - Environment map used to resolve key material.
+ * @param configPath - Worker YAML path.
+ * @returns Fully validated worker configuration with decoded binary keys.
+ * @throws {WorkerError} When YAML parsing, schema validation, or secret decoding fails.
  */
 export function readWorkerConfig(
   env: Record<string, string | undefined> = process.env,
