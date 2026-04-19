@@ -41,6 +41,8 @@ export async function migrateApiSchema(sql: postgres.Sql, controlSchema: string 
         webhook_url TEXT,
         status TEXT NOT NULL,
         vault_due_at TIMESTAMPTZ NOT NULL,
+        notification_due_at TIMESTAMPTZ,
+        shred_due_at TIMESTAMPTZ,
         shredded_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -60,6 +62,8 @@ export async function migrateApiSchema(sql: postgres.Sql, controlSchema: string 
       ADD COLUMN IF NOT EXISTS shadow_mode BOOLEAN NOT NULL DEFAULT FALSE,
       ADD COLUMN IF NOT EXISTS webhook_url TEXT,
       ADD COLUMN IF NOT EXISTS vault_due_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS notification_due_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS shred_due_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS shredded_at TIMESTAMPTZ,
       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     `;
@@ -162,6 +166,16 @@ export async function migrateApiSchema(sql: postgres.Sql, controlSchema: string 
       ON ${tx(safeSchema)}.erasure_jobs (status, vault_due_at, created_at)
     `;
 
+    await tx`
+      CREATE INDEX IF NOT EXISTS erasure_jobs_notice_due_status_idx
+      ON ${tx(safeSchema)}.erasure_jobs (status, notification_due_at, created_at)
+    `;
+
+    await tx`
+      CREATE INDEX IF NOT EXISTS erasure_jobs_shred_due_status_idx
+      ON ${tx(safeSchema)}.erasure_jobs (status, shred_due_at, created_at)
+    `;
+
     await tx`DROP INDEX IF EXISTS ${tx(safeSchema)}.task_queue_claim_idx`;
     await tx`
       CREATE INDEX task_queue_claim_idx
@@ -171,6 +185,11 @@ export async function migrateApiSchema(sql: postgres.Sql, controlSchema: string 
     await tx`
       CREATE INDEX IF NOT EXISTS task_queue_job_idx
       ON ${tx(safeSchema)}.task_queue (erasure_job_id, status)
+    `;
+
+    await tx`
+      CREATE UNIQUE INDEX IF NOT EXISTS task_queue_job_type_uidx
+      ON ${tx(safeSchema)}.task_queue (erasure_job_id, task_type)
     `;
 
     await tx`

@@ -19,7 +19,7 @@ This document serves as the absolute blueprint for the engine. It meticulously d
 ### 1.2 The Data Plane (Worker Sidecar)
 * **Role:** The Investigator and The Executioner.
 * **Stack:** Bun, Web Crypto API (`globalThis.crypto`), `postgres.js`.
-* **Liability Shield - Egress-Only Network:** The API never pushes into the client's network. The Worker polls via `GET /sync`. This eliminates the need for the client to open inbound firewall ports, drastically reducing their attack surface.
+* **Liability Shield - Egress-Only Network:** The API never pushes into the client's network. The Worker polls via `GET /sync` using a bounded 5-second short-poll loop. This eliminates the need for the client to open inbound firewall ports while avoiding the operational overhead of held HTTP long-polls or pub/sub infrastructure.
 * **Liability Shield - Key Isolation:** The 256-bit AES Master Key (`KEK`) is injected strictly into the Worker's environment variables by the client's own infrastructure (e.g., AWS KMS). The Control Plane never possesses the key to decrypt the vault.
 
 ---
@@ -50,6 +50,7 @@ The client must explicitly declare all targets. If any required field is omitted
     * If `transactions` exist $\to$ Applies `PMLA_FINANCIAL` rule (10 years).
     * If `kyc_documents` exist $\to$ Applies `RBI_KYC` rule (5 years).
     * If no evidence $\to$ Applies DPDP default (Immediate Erasure).
+4.  **Schedule Handoff:** The Worker emits `USER_VAULTED` with `notification_due_at` and `retention_expiry`. The Control Plane persists those timestamps as `notification_due_at` and `shred_due_at` on `erasure_jobs`, then lazily materializes `NOTIFY_USER` and `SHRED_USER` tasks when each timestamp becomes due.
 
 ---
 

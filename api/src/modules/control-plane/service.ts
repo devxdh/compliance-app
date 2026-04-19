@@ -40,6 +40,11 @@ interface TerminalCertificateEnvelope {
   };
 }
 
+interface VaultLifecycleSchedule {
+  notificationDueAt: Date;
+  shredDueAt: Date;
+}
+
 /**
  * Domain service for zero-PII control-plane orchestration.
  */
@@ -88,6 +93,72 @@ export class ControlPlaneService {
       legal_framework: job.legal_framework,
       shredded_at: shreddedAt.toISOString(),
       final_worm_hash: finalWormHash,
+    };
+  }
+
+  /**
+   * Extracts the Worker-computed retention schedule from a `USER_VAULTED` payload.
+   *
+   * The Worker is the sole source of legal evidence evaluation, but the Control Plane owns
+   * all future time progression. These timestamps must therefore be persisted durably the
+   * moment the vault event is accepted.
+   *
+   * @param payload - Canonical outbox payload emitted by the Worker.
+   * @returns Parsed notification/shred schedule.
+   * @throws {ApiError} When the required schedule fields are missing or invalid.
+   */
+  private parseVaultLifecycleSchedule(payload: Record<string, unknown>): VaultLifecycleSchedule {
+    const notificationCandidate =
+      typeof payload.notification_due_at === "string"
+        ? payload.notification_due_at
+        : typeof payload.notificationDueAt === "string"
+          ? payload.notificationDueAt
+          : null;
+    const shredCandidate =
+      typeof payload.retention_expiry === "string"
+        ? payload.retention_expiry
+        : typeof payload.retentionExpiry === "string"
+          ? payload.retentionExpiry
+          : null;
+
+    if (!notificationCandidate || !shredCandidate) {
+      fail({
+        code: "API_OUTBOX_VAULT_SCHEDULE_MISSING",
+        title: "Vault schedule metadata missing",
+        detail: "USER_VAULTED payload must include notification_due_at and retention_expiry.",
+        status: 400,
+        category: "validation",
+        retryable: false,
+      });
+    }
+
+    const notificationDueAt = new Date(notificationCandidate);
+    const shredDueAt = new Date(shredCandidate);
+    if (Number.isNaN(notificationDueAt.getTime()) || Number.isNaN(shredDueAt.getTime())) {
+      fail({
+        code: "API_OUTBOX_VAULT_SCHEDULE_INVALID",
+        title: "Vault schedule metadata invalid",
+        detail: "USER_VAULTED payload must carry valid ISO-8601 notification_due_at and retention_expiry timestamps.",
+        status: 400,
+        category: "validation",
+        retryable: false,
+      });
+    }
+
+    if (notificationDueAt.getTime() > shredDueAt.getTime()) {
+      fail({
+        code: "API_OUTBOX_VAULT_SCHEDULE_CONFLICT",
+        title: "Vault schedule order invalid",
+        detail: "notification_due_at cannot occur after retention_expiry.",
+        status: 409,
+        category: "integrity",
+        retryable: false,
+      });
+    }
+
+    return {
+      notificationDueAt,
+      shredDueAt,
     };
   }
 
@@ -297,22 +368,11 @@ export class ControlPlaneService {
 
   private async finalizeTerminalOutboxEvent(
     job: ErasureJobRow,
-    input: WorkerOutboxEventInput,
-    now: Date
+    eventType: "SHRED_SUCCESS" | "USER_HARD_DELETED",
+    shreddedAt: Date,
+    currentHash: string
   ): Promise<void> {
-    if (!isTerminalEventType(input.event_type)) {
-      return;
-    }
-
-    const shreddedAt = new Date(input.event_timestamp);
-    await this.repository.transitionJobFromOutbox({
-      jobId: input.request_id,
-      eventType: input.event_type,
-      now,
-      shreddedAt,
-    });
-
-    const certificate = await this.ensureTerminalCertificate(job, input.event_type, shreddedAt, input.current_hash);
+    const certificate = await this.ensureTerminalCertificate(job, eventType, shreddedAt, currentHash);
     if (!job.webhook_url) {
       return;
     }
@@ -323,13 +383,13 @@ export class ControlPlaneService {
       {
         request_id: job.id,
         subject_opaque_id: job.subject_opaque_id,
-        event_type: input.event_type,
+        event_type: eventType,
         legal_framework: job.legal_framework,
         shredded_at: shreddedAt.toISOString(),
         certificate: {
           request_id: job.id,
           subject_opaque_id: job.subject_opaque_id,
-          event_type: input.event_type,
+          event_type: eventType,
           method: certificate.payload.method,
           legal_framework: job.legal_framework,
           shredded_at: shreddedAt.toISOString(),
@@ -343,6 +403,36 @@ export class ControlPlaneService {
         },
       }
     );
+  }
+
+  /**
+   * Applies deterministic Control Plane state transitions for a committed Worker outbox event.
+   *
+   * This method is intentionally replay-safe. If the API crashes after appending the WORM ledger
+   * but before updating the state machine, a Worker retry must be able to restore the same
+   * lifecycle transition without creating duplicate tasks or certificates.
+   *
+   * @param job - Existing erasure job.
+   * @param input - Validated Worker outbox event.
+   * @param now - Request clock anchor.
+   * @returns Promise resolved once job state and terminal side effects are fully applied.
+   */
+  private async applyOutboxLifecycle(job: ErasureJobRow, input: WorkerOutboxEventInput, now: Date): Promise<void> {
+    const schedule = input.event_type === "USER_VAULTED" ? this.parseVaultLifecycleSchedule(input.payload) : null;
+    const shreddedAt = isTerminalEventType(input.event_type) ? new Date(input.event_timestamp) : undefined;
+
+    await this.repository.transitionJobFromOutbox({
+      jobId: input.request_id,
+      eventType: input.event_type,
+      now,
+      notificationDueAt: schedule?.notificationDueAt,
+      shredDueAt: schedule?.shredDueAt,
+      shreddedAt,
+    });
+
+    if (isTerminalEventType(input.event_type)) {
+      await this.finalizeTerminalOutboxEvent(job, input.event_type, shreddedAt!, input.current_hash);
+    }
   }
 
   /**
@@ -570,10 +660,7 @@ export class ControlPlaneService {
     const existingEvent = await this.repository.getAuditEventByIdempotencyKey(input.idempotency_key);
     if (existingEvent) {
       if (this.isReplayEquivalent(existingEvent, input, clientId)) {
-        if (isTerminalEventType(input.event_type)) {
-          await this.finalizeTerminalOutboxEvent(job, input, now);
-        }
-
+        await this.applyOutboxLifecycle(job, input, now);
         return { accepted: true as const, idempotent_replay: true as const };
       }
 
@@ -637,10 +724,7 @@ export class ControlPlaneService {
     if (!inserted) {
       const racedEvent = await this.repository.getAuditEventByIdempotencyKey(input.idempotency_key);
       if (racedEvent && this.isReplayEquivalent(racedEvent, input, clientId)) {
-        if (isTerminalEventType(input.event_type)) {
-          await this.finalizeTerminalOutboxEvent(job, input, now);
-        }
-
+        await this.applyOutboxLifecycle(job, input, now);
         return { accepted: true as const, idempotent_replay: true as const };
       }
 
@@ -654,15 +738,7 @@ export class ControlPlaneService {
       });
     }
 
-    if (isTerminalEventType(input.event_type)) {
-      await this.finalizeTerminalOutboxEvent(job, input, now);
-    } else {
-      await this.repository.transitionJobFromOutbox({
-        jobId: input.request_id,
-        eventType: input.event_type,
-        now,
-      });
-    }
+    await this.applyOutboxLifecycle(job, input, now);
 
     return { accepted: true as const, idempotent_replay: false as const };
   }

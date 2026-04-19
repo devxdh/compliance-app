@@ -28,6 +28,8 @@ export interface ErasureJobRow {
   webhook_url: string | null;
   status: ErasureRequestStatus;
   vault_due_at: Date;
+  notification_due_at: Date | null;
+  shred_due_at: Date | null;
   shredded_at: Date | null;
   created_at: Date;
   updated_at: Date;
@@ -37,7 +39,7 @@ export interface TaskQueueRow {
   id: string;
   client_id: string;
   erasure_job_id: string;
-  task_type: "VAULT_USER";
+  task_type: "VAULT_USER" | "NOTIFY_USER" | "SHRED_USER";
   payload: Record<string, unknown>;
   status: "QUEUED" | "DISPATCHED" | "COMPLETED" | "FAILED" | "DEAD_LETTER";
   worker_client_name: string | null;
@@ -89,6 +91,8 @@ interface TaskFailureEnvelope {
     fatal?: boolean;
   };
 }
+
+type DeferredLifecycleTaskType = "NOTIFY_USER" | "SHRED_USER";
 
 function calculateTaskRetryDelayMs(attemptNumber: number, baseBackoffMs: number): number {
   return Math.min(baseBackoffMs * 2 ** Math.max(0, attemptNumber - 1), 5 * 60 * 1000);
@@ -331,6 +335,82 @@ export class ControlPlaneRepository {
   }
 
   /**
+   * Materializes lifecycle tasks whose due timestamps have elapsed.
+   *
+   * The Control Plane remains the sole owner of time. It persists the Worker-computed
+   * `notification_due_at` and `shred_due_at` timestamps, then lazily translates them into
+   * executable tasks just before leasing. Inserts are idempotent via `(erasure_job_id, task_type)`.
+   *
+   * @param tx - Transaction-scoped Postgres handle.
+   * @param clientId - Authenticated worker client id.
+   * @param now - Scheduler clock anchor.
+   * @returns Promise resolved once due tasks have been upserted.
+   */
+  private async materializeDueLifecycleTasks(
+    tx: postgres.TransactionSql,
+    clientId: string,
+    now: Date
+  ): Promise<void> {
+    const buildLifecyclePayload = () => tx`
+      jsonb_strip_nulls(
+        jsonb_build_object(
+          'request_id', ej.id,
+          'subject_opaque_id', ej.subject_opaque_id,
+          'idempotency_key', ej.idempotency_key::text,
+          'trigger_source', ej.trigger_source,
+          'actor_opaque_id', ej.actor_opaque_id,
+          'legal_framework', ej.legal_framework,
+          'request_timestamp', ej.request_timestamp,
+          'tenant_id', ej.tenant_id,
+          'cooldown_days', ej.cooldown_days,
+          'shadow_mode', ej.shadow_mode,
+          'webhook_url', ej.webhook_url
+        )
+      )
+    `;
+
+    const insertLifecycleTask = async (taskType: DeferredLifecycleTaskType) => {
+      const dueColumn = taskType === "NOTIFY_USER" ? tx`ej.notification_due_at` : tx`ej.shred_due_at`;
+      const requiredStatus = taskType === "NOTIFY_USER" ? "VAULTED" : "NOTICE_SENT";
+
+      await tx`
+        INSERT INTO ${tx(this.schema)}.task_queue (
+          id,
+          client_id,
+          erasure_job_id,
+          task_type,
+          payload,
+          status,
+          attempt_count,
+          next_attempt_at,
+          created_at,
+          updated_at
+        )
+        SELECT
+          gen_random_uuid(),
+          ej.client_id,
+          ej.id,
+          ${taskType},
+          ${buildLifecyclePayload()},
+          'QUEUED',
+          0,
+          ${now},
+          ${now},
+          ${now}
+        FROM ${tx(this.schema)}.erasure_jobs AS ej
+        WHERE ej.client_id = ${clientId}
+          AND ej.status = ${requiredStatus}
+          AND ${dueColumn} IS NOT NULL
+          AND ${dueColumn} <= ${now}
+        ON CONFLICT (erasure_job_id, task_type) DO NOTHING
+      `;
+    };
+
+    await insertLifecycleTask("NOTIFY_USER");
+    await insertLifecycleTask("SHRED_USER");
+  }
+
+  /**
    * Claims the next due task using `FOR UPDATE SKIP LOCKED` leasing semantics.
    *
    * @param clientId - Authenticated worker client id.
@@ -340,6 +420,8 @@ export class ControlPlaneRepository {
    */
   async claimNextTask(clientId: string, workerClientName: string, now: Date): Promise<TaskQueueRow | null> {
     return this.sql.begin(async (tx) => {
+      await this.materializeDueLifecycleTasks(tx, clientId, now);
+
       const [candidate] = await tx<TaskQueueRow[]>`
         SELECT tq.*
         FROM ${tx(this.schema)}.task_queue AS tq
@@ -349,9 +431,20 @@ export class ControlPlaneRepository {
           AND tq.status IN ('QUEUED', 'DISPATCHED')
           AND tq.next_attempt_at <= ${now}
           AND (tq.status = 'QUEUED' OR tq.lease_expires_at IS NULL OR tq.lease_expires_at <= ${now})
-          AND ej.vault_due_at <= NOW()
-          AND ej.status NOT IN ('CANCELLED', 'SHREDDED')
-        ORDER BY ej.vault_due_at ASC, tq.next_attempt_at ASC, tq.created_at ASC
+          AND ej.status NOT IN ('CANCELLED', 'SHREDDED', 'FAILED')
+          AND (
+            (tq.task_type = 'VAULT_USER' AND ej.vault_due_at <= NOW())
+            OR (tq.task_type = 'NOTIFY_USER' AND ej.notification_due_at IS NOT NULL AND ej.notification_due_at <= ${now})
+            OR (tq.task_type = 'SHRED_USER' AND ej.shred_due_at IS NOT NULL AND ej.shred_due_at <= ${now})
+          )
+        ORDER BY
+          CASE
+            WHEN tq.task_type = 'VAULT_USER' THEN ej.vault_due_at
+            WHEN tq.task_type = 'NOTIFY_USER' THEN ej.notification_due_at
+            ELSE ej.shred_due_at
+          END ASC,
+          tq.next_attempt_at ASC,
+          tq.created_at ASC
         LIMIT 1
         FOR UPDATE OF tq, ej SKIP LOCKED
       `;
@@ -558,6 +651,8 @@ export class ControlPlaneRepository {
     jobId: string;
     eventType: OutboxEventType;
     now: Date;
+    notificationDueAt?: Date;
+    shredDueAt?: Date;
     shreddedAt?: Date;
   }) {
     const nextState =
@@ -570,6 +665,16 @@ export class ControlPlaneRepository {
     await this.sql`
       UPDATE ${this.sql(this.schema)}.erasure_jobs
       SET status = ${nextState},
+          notification_due_at = CASE
+            WHEN ${input.eventType === "USER_VAULTED"}
+              THEN ${input.notificationDueAt ?? null}
+            ELSE notification_due_at
+          END,
+          shred_due_at = CASE
+            WHEN ${input.eventType === "USER_VAULTED"}
+              THEN ${input.shredDueAt ?? null}
+            ELSE shred_due_at
+          END,
           shredded_at = CASE
             WHEN ${input.eventType === "SHRED_SUCCESS" || input.eventType === "USER_HARD_DELETED"}
               THEN ${input.shreddedAt ?? input.now}

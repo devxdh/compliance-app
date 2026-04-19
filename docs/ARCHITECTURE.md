@@ -84,8 +84,8 @@ Code generation must map exactly to these structures.
 
 #### A. Control Plane (Central API)
 * `clients`: `(id UUID PK, name TEXT, worker_api_key_hash TEXT)`
-* `erasure_jobs`: `(id UUID PK, client_id UUID, client_internal_user_id TEXT, user_uuid_hash TEXT, status TEXT, vault_due_at TIMESTAMPTZ, shred_due_at TIMESTAMPTZ)`
-* `task_queue`: `(id UUID PK, client_id UUID, task_type TEXT, payload JSONB, status TEXT DEFAULT 'QUEUED')`
+* `erasure_jobs`: `(id UUID PK, client_id UUID, idempotency_key UUID, subject_opaque_id TEXT, trigger_source TEXT, actor_opaque_id TEXT, legal_framework TEXT, request_timestamp TIMESTAMPTZ, tenant_id TEXT NULL, cooldown_days INT, shadow_mode BOOLEAN, webhook_url TEXT NULL, status TEXT, vault_due_at TIMESTAMPTZ, notification_due_at TIMESTAMPTZ NULL, shred_due_at TIMESTAMPTZ NULL, shredded_at TIMESTAMPTZ NULL)`
+* `task_queue`: `(id UUID PK, client_id UUID, erasure_job_id UUID, task_type TEXT, payload JSONB, status TEXT DEFAULT 'QUEUED', attempt_count INT, next_attempt_at TIMESTAMPTZ, dead_lettered_at TIMESTAMPTZ NULL)`
 * `audit_ledger`: `(id UUID PK, client_id UUID, worker_idempotency_key TEXT UNIQUE, event_type TEXT, payload JSONB, current_hash TEXT)`
 
 #### B. Data Plane (Client DB / Worker Target)
@@ -106,7 +106,7 @@ The API is purely a state coordinator. It provides three core endpoints protecte
 
 #### 5.2. Core Endpoints
 1. **`GET /api/v1/worker/sync`**
-   * **Mechanism:** Queries `task_queue` for the oldest 'QUEUED' task.
+   * **Mechanism:** The Worker calls this endpoint in a bounded 5-second short-poll loop. Before leasing, the Control Plane materializes any due `NOTIFY_USER` or `SHRED_USER` tasks from `erasure_jobs.notification_due_at` / `erasure_jobs.shred_due_at`, then queries `task_queue` for the oldest due task.
    * **Caveat/Rule:** MUST use `FOR UPDATE SKIP LOCKED` to prevent race conditions across a fleet of workers. Updates status to 'DISPATCHED'.
 2. **`POST /api/v1/worker/tasks/:taskId/ack`**
    * **Mechanism:** Updates `task_queue` to 'COMPLETED' or 'FAILED' and advances the state of `erasure_jobs`.
@@ -119,7 +119,7 @@ The API is purely a state coordinator. It provides three core endpoints protecte
 
 ### 6. Component 2: The Data Plane (Worker Sidecar)
 
-The worker executes physical data mutations. It operates in a continuous polling loop.
+The worker executes physical data mutations. It operates in a continuous 5-second short-poll loop against the Control Plane.
 
 #### 6.1. Boot Sequence & Liability Firewall
 * Parses `compliance.worker.yml`. Validates KEK entropy (must be exactly 32 bytes).

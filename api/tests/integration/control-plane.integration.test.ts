@@ -480,6 +480,8 @@ describe("Control Plane API (Integration)", () => {
       applied_rule_name: "PMLA_FINANCIAL",
       event_timestamp: "2026-04-19T10:00:00.000Z",
       retention_years: 10,
+      notification_due_at: "2036-04-17T10:00:00.000Z",
+      retention_expiry: "2036-04-19T10:00:00.000Z",
     };
     const idempotencyKey = `vault:${created.request_id}`;
     const currentHash = await computeCurrentHash("GENESIS", payload);
@@ -503,12 +505,227 @@ describe("Control Plane API (Integration)", () => {
     });
     expect(outboxResponse.status).toBe(202);
 
-    const [job] = await sql<{ status: string }[]>`
-      SELECT status
+    const [job] = await sql<{
+      status: string;
+      notification_due_at: Date | null;
+      shred_due_at: Date | null;
+    }[]>`
+      SELECT status, notification_due_at, shred_due_at
       FROM ${sql(controlSchema)}.erasure_jobs
       WHERE id = ${created.request_id}
     `;
     expect(job?.status).toBe("VAULTED");
+    expect(job?.notification_due_at?.toISOString()).toBe("2036-04-17T10:00:00.000Z");
+    expect(job?.shred_due_at?.toISOString()).toBe("2036-04-19T10:00:00.000Z");
+  });
+
+  it("materializes a NOTIFY_USER task after USER_VAULTED reaches notification_due_at", async () => {
+    const now = new Date("2036-04-17T10:00:00.000Z");
+    const { app, controlSchema } = await setup({ now: () => now });
+    const request = buildErasureRequest({ subject_opaque_id: "usr_notice_due", cooldown_days: 0 });
+
+    const createResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const created = (await createResponse.json()) as { request_id: string; task_id: string };
+
+    const leaseResponse = await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+    expect(leaseResponse.status).toBe(200);
+
+    await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        status: "completed",
+        result: { action: "vaulted" },
+      }),
+    });
+
+    const vaultPayload = {
+      request_id: created.request_id,
+      subject_opaque_id: request.subject_opaque_id,
+      tenant_id: null,
+      trigger_source: request.trigger_source,
+      legal_framework: request.legal_framework,
+      actor_opaque_id: request.actor_opaque_id,
+      applied_rule_name: "PMLA_FINANCIAL",
+      event_timestamp: "2026-04-19T10:00:00.000Z",
+      retention_years: 10,
+      notification_due_at: "2036-04-17T10:00:00.000Z",
+      retention_expiry: "2036-04-19T10:00:00.000Z",
+    };
+    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload);
+    const vaultResponse = await app.request("/api/v1/worker/outbox", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        idempotency_key: `vault:${created.request_id}`,
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        event_type: "USER_VAULTED",
+        payload: vaultPayload,
+        previous_hash: "GENESIS",
+        current_hash: vaultHash,
+        event_timestamp: "2026-04-19T10:00:00.000Z",
+      }),
+    });
+    expect(vaultResponse.status).toBe(202);
+
+    const syncResponse = await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+    expect(syncResponse.status).toBe(200);
+    expect(await syncResponse.json()).toEqual(
+      expect.objectContaining({
+        pending: true,
+        task: expect.objectContaining({
+          task_type: "NOTIFY_USER",
+          payload: expect.objectContaining({
+            request_id: created.request_id,
+            subject_opaque_id: request.subject_opaque_id,
+          }),
+        }),
+      })
+    );
+
+    const [taskRow] = await sql<{ task_type: string; status: string }[]>`
+      SELECT task_type, status
+      FROM ${sql(controlSchema)}.task_queue
+      WHERE erasure_job_id = ${created.request_id}
+        AND task_type = 'NOTIFY_USER'
+    `;
+    expect(taskRow?.task_type).toBe("NOTIFY_USER");
+    expect(taskRow?.status).toBe("DISPATCHED");
+  });
+
+  it("materializes a SHRED_USER task after NOTIFICATION_SENT reaches retention expiry", async () => {
+    const now = new Date("2036-04-19T10:00:00.000Z");
+    const { app, controlSchema } = await setup({ now: () => now });
+    const request = buildErasureRequest({ subject_opaque_id: "usr_shred_due", cooldown_days: 0 });
+
+    const createResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const created = (await createResponse.json()) as { request_id: string; task_id: string };
+
+    const leaseResponse = await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+    expect(leaseResponse.status).toBe(200);
+
+    await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        status: "completed",
+        result: { action: "vaulted" },
+      }),
+    });
+
+    const vaultPayload = {
+      request_id: created.request_id,
+      subject_opaque_id: request.subject_opaque_id,
+      trigger_source: request.trigger_source,
+      legal_framework: request.legal_framework,
+      actor_opaque_id: request.actor_opaque_id,
+      applied_rule_name: "PMLA_FINANCIAL",
+      event_timestamp: "2026-04-19T10:00:00.000Z",
+      notification_due_at: "2036-04-17T10:00:00.000Z",
+      retention_expiry: "2036-04-19T10:00:00.000Z",
+    };
+    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload);
+    await app.request("/api/v1/worker/outbox", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        idempotency_key: `vault:${created.request_id}`,
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        event_type: "USER_VAULTED",
+        payload: vaultPayload,
+        previous_hash: "GENESIS",
+        current_hash: vaultHash,
+        event_timestamp: "2026-04-19T10:00:00.000Z",
+      }),
+    });
+
+    const noticePayload = {
+      request_id: created.request_id,
+      subject_opaque_id: request.subject_opaque_id,
+      trigger_source: request.trigger_source,
+      legal_framework: request.legal_framework,
+      actor_opaque_id: request.actor_opaque_id,
+      applied_rule_name: "PMLA_FINANCIAL",
+      event_timestamp: "2036-04-17T10:00:00.000Z",
+      sent_at: "2036-04-17T10:00:00.000Z",
+    };
+    const noticeHash = await computeCurrentHash(vaultHash, noticePayload);
+    const noticeResponse = await app.request("/api/v1/worker/outbox", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        idempotency_key: `notice:${created.request_id}`,
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        event_type: "NOTIFICATION_SENT",
+        payload: noticePayload,
+        previous_hash: vaultHash,
+        current_hash: noticeHash,
+        event_timestamp: "2036-04-17T10:00:00.000Z",
+      }),
+    });
+    expect(noticeResponse.status).toBe(202);
+
+    const syncResponse = await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+    expect(syncResponse.status).toBe(200);
+    expect(await syncResponse.json()).toEqual(
+      expect.objectContaining({
+        pending: true,
+        task: expect.objectContaining({
+          task_type: "SHRED_USER",
+          payload: expect.objectContaining({
+            request_id: created.request_id,
+            subject_opaque_id: request.subject_opaque_id,
+          }),
+        }),
+      })
+    );
+
+    const [taskRow] = await sql<{ task_type: string; status: string }[]>`
+      SELECT task_type, status
+      FROM ${sql(controlSchema)}.task_queue
+      WHERE erasure_job_id = ${created.request_id}
+        AND task_type = 'SHRED_USER'
+    `;
+    expect(taskRow?.task_type).toBe("SHRED_USER");
+    expect(taskRow?.status).toBe("DISPATCHED");
   });
 
   it("ingests SHRED_SUCCESS and mints a certificate of erasure", async () => {
@@ -541,6 +758,8 @@ describe("Control Plane API (Integration)", () => {
       actor_opaque_id: request.actor_opaque_id,
       applied_rule_name: "PMLA_FINANCIAL",
       event_timestamp: "2026-04-19T10:00:00.000Z",
+      notification_due_at: "2036-04-17T10:00:00.000Z",
+      retention_expiry: "2036-04-19T10:00:00.000Z",
     };
     const vaultIdempotencyKey = `vault:${created.request_id}`;
     const vaultHash = await computeCurrentHash("GENESIS", vaultPayload);
