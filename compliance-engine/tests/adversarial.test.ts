@@ -70,7 +70,7 @@ describe("Adversarial Worker Suite", () => {
     await sql.end();
   });
 
-  it("Vector 1: fails closed on null retention years and catches SQL-injection root table config", async () => {
+  it("Vector 1: fails closed on toxic config and quoted identifier injection attempts", async () => {
     const nullRetentionPath = await writeTempYaml(`
 version: "1.0"
 database:
@@ -168,6 +168,24 @@ integrity:
         injectionPath
       )
     ).toThrow(/invalid graph root table/i);
+
+    const injectionSchema = uniqueSchema("adversarial_identifier");
+    schemasToDrop.push(injectionSchema);
+    await dropSchemas(sql, injectionSchema);
+    await sql`CREATE SCHEMA ${sql(injectionSchema)}`;
+    await sql`CREATE TABLE ${sql(injectionSchema)}.clients (id SERIAL PRIMARY KEY)`;
+
+    await expect(
+      sql`
+        SELECT 1
+        FROM ${sql(injectionSchema)}.${sql("users; DROP TABLE clients;--")}
+      `
+    ).rejects.toThrow();
+
+    const [tableCheck] = await sql<{ regclass: string | null }[]>`
+      SELECT to_regclass(${`${injectionSchema}.clients`}) AS regclass
+    `;
+    expect(tableCheck?.regclass).toBe(`${injectionSchema}.clients`);
   });
 
   it("Vector 2: prevents TOCTOU partial mutation under delayed graph discovery and concurrent FK insert", async () => {

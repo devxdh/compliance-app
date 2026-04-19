@@ -24,4 +24,24 @@ describe("CoE Cryptography", () => {
     expect(signature.keyId).toBe("test-key");
     expect(verified).toBe(true);
   });
+
+  it("verifies signatures against semantically equivalent payloads with different key order", async () => {
+    const signer = await createEd25519Signer("test-key");
+    const payload = {
+      request_id: "req_123",
+      legal_framework: "DPDP_2023",
+      final_worm_hash: "ab".repeat(32),
+      nested: { b: 2, a: 1 },
+    };
+
+    const signature = await signer.sign(payload);
+    const verified = await verifyEd25519Signature(signature.publicKeySpkiBase64, signature.signatureBase64, {
+      nested: { a: 1, b: 2 },
+      final_worm_hash: "ab".repeat(32),
+      legal_framework: "DPDP_2023",
+      request_id: "req_123",
+    });
+
+    expect(verified).toBe(true);
+  });
 });

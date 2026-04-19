@@ -2,6 +2,35 @@ import { fail } from "../errors";
 
 const textEncoder = new TextEncoder();
 
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+
+function sortJson(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) {
+    return value.map((item) => sortJson(item));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort((left, right) => left.localeCompare(right))
+        .map((key) => [key, sortJson((value as Record<string, JsonValue>)[key]!)])
+    );
+  }
+
+  return value;
+}
+
+function canonicalJsonStringify(value: unknown): string {
+  const firstPass = JSON.stringify(value);
+  if (firstPass === undefined) {
+    throw new TypeError("Value is not JSON-serializable.");
+  }
+
+  const parsed = JSON.parse(firstPass) as JsonValue;
+  return JSON.stringify(sortJson(parsed));
+}
+
 export interface CoeSignature {
   algorithm: "Ed25519";
   keyId: string;
@@ -17,7 +46,7 @@ export interface CoeSigner {
 }
 
 function encodePayload(payload: unknown): ArrayBuffer {
-  const source = textEncoder.encode(JSON.stringify(payload));
+  const source = textEncoder.encode(canonicalJsonStringify(payload));
   const copied = new Uint8Array(source.length);
   copied.set(source);
   return copied.buffer as ArrayBuffer;

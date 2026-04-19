@@ -1,6 +1,11 @@
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
+function toHex(buffer: ArrayBuffer | Uint8Array): string {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function sortJson(value: JsonValue): JsonValue {
   if (Array.isArray(value)) {
     return value.map((item) => sortJson(item));
@@ -32,13 +37,12 @@ export function canonicalJsonStringify(value: unknown): string {
  *
  * @param previousHash - Prior chain hash or `GENESIS`.
  * @param payload - Event payload body.
- * @param idempotencyKey - Worker idempotency key.
  * @returns Chain hash for the current event.
  */
-export async function computeWormHash(previousHash: string, payload: unknown, idempotencyKey: string): Promise<string> {
-  const data = new TextEncoder().encode(`${previousHash}${canonicalJsonStringify(payload)}${idempotencyKey}`);
+export async function computeWormHash(previousHash: string, payload: unknown): Promise<string> {
+  const data = new TextEncoder().encode(`${previousHash}${canonicalJsonStringify(payload)}`);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
-  return Buffer.from(digest).toString("hex");
+  return toHex(digest);
 }
 
 /**
@@ -50,5 +54,5 @@ export async function computeWormHash(previousHash: string, payload: unknown, id
 export async function computeTokenHash(token: string): Promise<string> {
   const data = new TextEncoder().encode(token);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
-  return Buffer.from(digest).toString("hex");
+  return toHex(digest);
 }

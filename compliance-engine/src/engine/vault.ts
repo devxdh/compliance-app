@@ -1,6 +1,6 @@
 import postgres from "postgres";
 import type { MutationRule, RetentionRule, RootPiiColumns, SatelliteTarget } from "../config/worker";
-import { encryptGCM } from "../crypto/aes";
+import { encryptGCMBytes } from "../crypto/aes";
 import { generateDEK, wrapKey } from "../crypto/envelope";
 import { generateHMAC } from "../crypto/hmac";
 import { getDependencyGraph } from "../db/graph";
@@ -10,7 +10,6 @@ import type { VaultUserOptions, VaultUserResult, WorkerSecrets } from "./contrac
 import { redactSatelliteTable } from "./satellite";
 import {
   assertWorkerSecrets,
-  calculateRetentionWindow,
   createPseudonym,
   createUserHash,
   enqueueOutboxEvent,
@@ -313,12 +312,12 @@ async function mutateSatelliteTargets(
 }
 
 async function resolveRetentionWindow(
-  tx: postgres.TransactionSql,
+  sql: postgres.Sql | postgres.TransactionSql,
   now: Date,
   retentionYears: number,
   noticeWindowHours: number
 ): Promise<{ retentionExpiry: Date; notificationDueAt: Date }> {
-  const [window] = await tx<{ retention_expiry: Date; notification_due_at: Date }[]>`
+  const [window] = await sql<{ retention_expiry: Date; notification_due_at: Date }[]>`
     SELECT
       ${now}::timestamptz + MAKE_INTERVAL(years := ${retentionYears}) AS retention_expiry,
       GREATEST(
@@ -475,7 +474,12 @@ export async function vaultUser(
       retentionYears: defaultRetentionYears,
       appliedRuleName: "DEFAULT",
     };
-    const { retentionExpiry, notificationDueAt } = calculateRetentionWindow(now, retention.retentionYears, noticeWindowHours);
+    const { retentionExpiry, notificationDueAt } = await resolveRetentionWindow(
+      sql,
+      now,
+      retention.retentionYears,
+      noticeWindowHours
+    );
     const existingVault = await getVaultRecordByUserId(
       sql,
       engineSchema,
@@ -511,6 +515,7 @@ export async function vaultUser(
   }
 
   let dek: Uint8Array = new Uint8Array(0);
+  let plaintextPiiBuffer: Uint8Array = new Uint8Array(0);
   let encryptedPiiBuffer: Uint8Array = new Uint8Array(0);
 
   try {
@@ -710,7 +715,8 @@ export async function vaultUser(
 
         dek = generateDEK();
         const wrappedDEK = await wrapKey(dek, kek);
-        encryptedPiiBuffer = await encryptGCM(JSON.stringify(rootPiiPayload), dek);
+        plaintextPiiBuffer = new TextEncoder().encode(JSON.stringify(rootPiiPayload));
+        encryptedPiiBuffer = await encryptGCMBytes(plaintextPiiBuffer, dek);
         const encryptedPiiPayload = {
           v: 1,
           data: Buffer.from(encryptedPiiBuffer).toString("base64"),
@@ -844,6 +850,7 @@ export async function vaultUser(
     }
   } finally {
     dek.fill(0);
+    plaintextPiiBuffer.fill(0);
     encryptedPiiBuffer.fill(0);
   }
 }

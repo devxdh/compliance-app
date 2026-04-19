@@ -8,6 +8,59 @@ import { fail } from "../errors";
 
 const IV_LENGTH = 12; // 96-bit IV is the industry standard for GCM.
 const KEY_LENGTH = 32; // 256-bit key for AES-256.
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+function assertAesKeyLength(rawKey: Uint8Array) {
+  if (rawKey.length !== KEY_LENGTH) {
+    fail({
+      code: "DPDP_CRYPTO_INVALID_KEY_LENGTH",
+      title: "Invalid AES key length",
+      detail: `Invalid key length. Expected ${KEY_LENGTH} bytes for AES-256, got ${rawKey.length} bytes.`,
+      category: "crypto",
+      retryable: false,
+    });
+  }
+}
+
+async function importAesKey(rawKey: Uint8Array, usages: readonly ("encrypt" | "decrypt")[]): Promise<CryptoKey> {
+  assertAesKeyLength(rawKey);
+
+  return globalThis.crypto.subtle.importKey(
+    "raw",
+    rawKey as any,
+    "AES-GCM",
+    false,
+    [...usages]
+  );
+}
+
+/**
+ * Encrypts raw bytes using AES-256-GCM.
+ *
+ * This overload exists for sensitive call sites that need direct control over plaintext buffer
+ * lifecycle so the caller can explicitly wipe the source bytes after encryption.
+ *
+ * @param plaintext - Raw plaintext bytes to encrypt.
+ * @param rawKey - 32-byte symmetric key.
+ * @returns Combined buffer in `IV || ciphertext+tag` format.
+ * @throws {WorkerError} When key length is invalid.
+ */
+export async function encryptGCMBytes(plaintext: Uint8Array, rawKey: Uint8Array): Promise<Uint8Array> {
+  const key = await importAesKey(rawKey, ["encrypt"]);
+  const iv = globalThis.crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+  const ciphertextBuffer = await globalThis.crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    plaintext as any
+  );
+
+  const combined = new Uint8Array(iv.length + ciphertextBuffer.byteLength);
+  combined.set(iv);
+  combined.set(new Uint8Array(ciphertextBuffer), iv.length);
+
+  return combined;
+}
 
 /**
  * Encrypts UTF-8 plaintext using AES-256-GCM.
@@ -18,40 +71,12 @@ const KEY_LENGTH = 32; // 256-bit key for AES-256.
  * @throws {WorkerError} When key length is invalid.
  */
 export async function encryptGCM(plaintext: string, rawKey: Uint8Array): Promise<Uint8Array> {
-  if (rawKey.length !== KEY_LENGTH) {
-    fail({
-      code: "DPDP_CRYPTO_INVALID_KEY_LENGTH",
-      title: "Invalid AES key length",
-      detail: `Invalid key length. Expected ${KEY_LENGTH} bytes for AES-256, got ${rawKey.length} bytes.`,
-      category: "crypto",
-      retryable: false,
-    });
+  const plaintextBytes = textEncoder.encode(plaintext);
+  try {
+    return await encryptGCMBytes(plaintextBytes, rawKey);
+  } finally {
+    plaintextBytes.fill(0);
   }
-
-  const crypto = globalThis.crypto;
-
-  const key = await crypto.subtle.importKey(
-    "raw",
-    rawKey as any,
-    "AES-GCM",
-    false,
-    ["encrypt"]
-  );
-
-  const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
-
-  const encodedData = new TextEncoder().encode(plaintext);
-  const ciphertextBuffer = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
-    key,
-    encodedData
-  );
-
-  const combined = new Uint8Array(iv.length + ciphertextBuffer.byteLength);
-  combined.set(iv);
-  combined.set(new Uint8Array(ciphertextBuffer), iv.length);
-
-  return combined;
 }
 
 /**
@@ -63,15 +88,7 @@ export async function encryptGCM(plaintext: string, rawKey: Uint8Array): Promise
  * @throws {WorkerError} When key/ciphertext is invalid or integrity verification fails.
  */
 export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Promise<string> {
-  if (rawKey.length !== KEY_LENGTH) {
-    fail({
-      code: "DPDP_CRYPTO_INVALID_KEY_LENGTH",
-      title: "Invalid AES key length",
-      detail: `Invalid key length. Expected ${KEY_LENGTH} bytes for AES-256, got ${rawKey.length} bytes.`,
-      category: "crypto",
-      retryable: false,
-    });
-  }
+  assertAesKeyLength(rawKey);
 
   if (combined.length < IV_LENGTH + 16) {
     fail({
@@ -88,13 +105,7 @@ export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Prom
   const iv = combined.slice(0, IV_LENGTH);
   const ciphertext = combined.slice(IV_LENGTH);
 
-  const key = await crypto.subtle.importKey(
-    "raw",
-    rawKey as any,
-    "AES-GCM",
-    false,
-    ["decrypt"]
-  );
+  const key = await importAesKey(rawKey, ["decrypt"]);
 
   let decryptedBuffer: ArrayBuffer;
   try {
@@ -114,5 +125,5 @@ export async function decryptGCM(combined: Uint8Array, rawKey: Uint8Array): Prom
     });
   }
 
-  return new TextDecoder().decode(decryptedBuffer);
+  return textDecoder.decode(decryptedBuffer);
 }

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import postgres from "postgres";
 import { createApp } from "../../src/app";
-import { createEd25519Signer } from "../../src/crypto/coe";
+import { createEd25519Signer, verifyEd25519Signature } from "../../src/crypto/coe";
 import { migrateApiSchema } from "../../src/db/migrations";
 import { computeWormHash } from "../../src/modules/control-plane/hash";
 import { createTestSql, dropSchemas, uniqueSchema } from "../helpers/db";
@@ -58,11 +58,11 @@ describe("Control Plane API (Integration)", () => {
     };
   }
 
-  async function computeCurrentHash(previousHash: string, payload: unknown, idempotencyKey: string): Promise<string> {
-    return computeWormHash(previousHash, payload, idempotencyKey);
+  async function computeCurrentHash(previousHash: string, payload: unknown): Promise<string> {
+    return computeWormHash(previousHash, payload);
   }
 
-  it("rejects undeclared PII fields and missing mandatory actor metadata", async () => {
+  it("rejects undeclared PII fields, direct identifiers, and missing mandatory actor metadata", async () => {
     const { app } = await setup();
 
     const extraFieldResponse = await app.request("/api/v1/erasure-requests", {
@@ -74,6 +74,28 @@ describe("Control Plane API (Integration)", () => {
       }),
     });
     expect(extraFieldResponse.status).toBe(400);
+
+    const emailSubjectResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        buildErasureRequest({
+          subject_opaque_id: "alice@example.com",
+        })
+      ),
+    });
+    expect(emailSubjectResponse.status).toBe(400);
+
+    const phoneActorResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        buildErasureRequest({
+          actor_opaque_id: "+91 9876543210",
+        })
+      ),
+    });
+    expect(phoneActorResponse.status).toBe(400);
 
     const missingActorResponse = await app.request("/api/v1/erasure-requests", {
       method: "POST",
@@ -87,6 +109,52 @@ describe("Control Plane API (Integration)", () => {
       }),
     });
     expect(missingActorResponse.status).toBe(400);
+  });
+
+  it("reuses the same cooldown timer on idempotent create replay", async () => {
+    const { app, controlSchema } = await setup();
+    const request = buildErasureRequest({
+      subject_opaque_id: "usr_idempotent",
+      cooldown_days: 30,
+    });
+
+    const firstResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    expect(firstResponse.status).toBe(202);
+    const firstBody = (await firstResponse.json()) as {
+      request_id: string;
+      task_id: string;
+      idempotent_replay: boolean;
+    };
+    expect(firstBody.idempotent_replay).toBe(false);
+
+    const replayResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    expect(replayResponse.status).toBe(202);
+    const replayBody = (await replayResponse.json()) as {
+      request_id: string;
+      task_id: string;
+      idempotent_replay: boolean;
+    };
+    expect(replayBody.request_id).toBe(firstBody.request_id);
+    expect(replayBody.task_id).toBe(firstBody.task_id);
+    expect(replayBody.idempotent_replay).toBe(true);
+
+    const [counts] = await sql<{ job_count: number; task_count: number }[]>`
+      SELECT
+        (SELECT COUNT(*)::int FROM ${sql(controlSchema)}.erasure_jobs WHERE idempotency_key = ${request.idempotency_key}::uuid) AS job_count,
+        (SELECT COUNT(*)::int FROM ${sql(controlSchema)}.task_queue WHERE erasure_job_id = ${firstBody.request_id}) AS task_count
+    `;
+    expect(counts).toEqual({
+      job_count: 1,
+      task_count: 1,
+    });
   });
 
   it("sync dispatches only due jobs and ignores cancelled or future cooldown work", async () => {
@@ -246,7 +314,7 @@ describe("Control Plane API (Integration)", () => {
       retention_years: 10,
     };
     const idempotencyKey = `vault:${created.request_id}`;
-    const currentHash = await computeCurrentHash("GENESIS", payload, idempotencyKey);
+    const currentHash = await computeCurrentHash("GENESIS", payload);
 
     const outboxResponse = await app.request("/api/v1/worker/outbox", {
       method: "POST",
@@ -276,7 +344,7 @@ describe("Control Plane API (Integration)", () => {
   });
 
   it("ingests SHRED_SUCCESS and mints a certificate of erasure", async () => {
-    const { app } = await setup();
+    const { app, controlSchema } = await setup();
     const request = buildErasureRequest({ subject_opaque_id: "usr_cert", cooldown_days: 0 });
     const createResponse = await app.request("/api/v1/erasure-requests", {
       method: "POST",
@@ -307,7 +375,7 @@ describe("Control Plane API (Integration)", () => {
       event_timestamp: "2026-04-19T10:00:00.000Z",
     };
     const vaultIdempotencyKey = `vault:${created.request_id}`;
-    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload, vaultIdempotencyKey);
+    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload);
     await app.request("/api/v1/worker/outbox", {
       method: "POST",
       headers: {
@@ -337,7 +405,7 @@ describe("Control Plane API (Integration)", () => {
       shredded_at: "2036-04-19T10:00:00.000Z",
     };
     const shredIdempotencyKey = `shred:${created.request_id}`;
-    const shredHash = await computeCurrentHash(vaultHash, shredPayload, shredIdempotencyKey);
+    const shredHash = await computeCurrentHash(vaultHash, shredPayload);
     const shredResponse = await app.request("/api/v1/worker/outbox", {
       method: "POST",
       headers: {
@@ -364,11 +432,31 @@ describe("Control Plane API (Integration)", () => {
       subject_opaque_id: string;
       legal_framework: string;
       method: string;
+      final_worm_hash: string;
     };
     expect(certificate.request_id).toBe(created.request_id);
     expect(certificate.subject_opaque_id).toBe(request.subject_opaque_id);
     expect(certificate.legal_framework).toBe(request.legal_framework);
     expect(certificate.method).toBe("CRYPTO_SHREDDING_DEK_DELETE");
+    expect(certificate.final_worm_hash).toBe(shredHash);
+
+    const [storedCertificate] = await sql<{
+      payload: Record<string, unknown>;
+      signature_base64: string;
+      public_key_spki_base64: string;
+    }[]>`
+      SELECT payload, signature_base64, public_key_spki_base64
+      FROM ${sql(controlSchema)}.certificates
+      WHERE request_id = ${created.request_id}
+    `;
+    expect(storedCertificate?.payload.final_worm_hash).toBe(shredHash);
+    expect(
+      await verifyEd25519Signature(
+        storedCertificate!.public_key_spki_base64,
+        storedCertificate!.signature_base64,
+        storedCertificate!.payload
+      )
+    ).toBe(true);
   });
 
   it("dispatches terminal webhook payload when webhook_url is configured", async () => {
@@ -416,7 +504,7 @@ describe("Control Plane API (Integration)", () => {
         shredded_at: "2036-04-19T10:00:00.000Z",
       };
       const shredIdempotencyKey = `shred:${created.request_id}`;
-      const shredHash = await computeCurrentHash("GENESIS", shredPayload, shredIdempotencyKey);
+      const shredHash = await computeCurrentHash("GENESIS", shredPayload);
 
       const shredResponse = await app.request("/api/v1/worker/outbox", {
         method: "POST",

@@ -114,14 +114,12 @@ describe("Network Outbox Relay", () => {
 
     const expectedFirstBuffer = await globalThis.crypto.subtle.digest(
       "SHA-256",
-      new TextEncoder().encode(`GENESIS${JSON.stringify({ rootId: "1", state: "vaulted" })}vault:tenant:users:1`)
+      new TextEncoder().encode(`GENESIS${JSON.stringify({ rootId: "1", state: "vaulted" })}`)
     );
     const expectedFirstHash = Buffer.from(expectedFirstBuffer).toString("hex");
     const expectedSecondBuffer = await globalThis.crypto.subtle.digest(
       "SHA-256",
-      new TextEncoder().encode(
-        `${expectedFirstHash}${JSON.stringify({ rootId: "2", state: "notified" })}notice:tenant:users:2`
-      )
+      new TextEncoder().encode(`${expectedFirstHash}${JSON.stringify({ rootId: "2", state: "notified" })}`)
     );
     const expectedSecondHash = Buffer.from(expectedSecondBuffer).toString("hex");
 

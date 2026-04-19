@@ -147,6 +147,10 @@ export function createControlPlaneRouter(service: ControlPlaneService) {
         method: certificate.method,
         legal_framework: certificate.legal_framework,
         shredded_at: certificate.shredded_at.toISOString(),
+        final_worm_hash:
+          typeof (certificate.payload as Record<string, unknown>)?.final_worm_hash === "string"
+            ? ((certificate.payload as Record<string, unknown>).final_worm_hash as string)
+            : null,
         signature: {
           algorithm: certificate.algorithm,
           key_id: certificate.key_id,

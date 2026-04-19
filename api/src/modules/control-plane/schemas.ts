@@ -1,6 +1,19 @@
 import { z } from "zod";
 
 const isoDateTime = z.string().datetime();
+const emailLikePattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+
+function looksLikePhoneNumber(value: string): boolean {
+  const normalized = value.replace(/[\s()-]/g, "");
+  return /^\+?[0-9]{7,15}$/.test(normalized);
+}
+
+const opaqueIdentifierSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((value) => !emailLikePattern.test(value), "must be an opaque identifier, not an email address")
+  .refine((value) => !looksLikePhoneNumber(value), "must be an opaque identifier, not a phone number");
 
 export const erasureTriggerSourceSchema = z.enum([
   "USER_CONSENT_WITHDRAWAL",
@@ -33,10 +46,10 @@ export const outboxEventTypeSchema = z.enum([
  */
 export const createErasureRequestSchema = z
   .object({
-    subject_opaque_id: z.string().min(1),
+    subject_opaque_id: opaqueIdentifierSchema,
     idempotency_key: z.string().uuid(),
     trigger_source: erasureTriggerSourceSchema,
-    actor_opaque_id: z.string().min(1),
+    actor_opaque_id: opaqueIdentifierSchema,
     legal_framework: z.string().min(1),
     request_timestamp: isoDateTime,
     tenant_id: z.string().min(1).optional(),

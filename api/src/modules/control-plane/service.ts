@@ -14,6 +14,10 @@ interface ServiceOptions {
   now?: () => Date;
 }
 
+function resolveCertificateMethod(eventType: "SHRED_SUCCESS" | "USER_HARD_DELETED"): "CRYPTO_SHREDDING_DEK_DELETE" | "DIRECT_DELETE_ROOT_ROW" {
+  return eventType === "SHRED_SUCCESS" ? "CRYPTO_SHREDDING_DEK_DELETE" : "DIRECT_DELETE_ROOT_ROW";
+}
+
 /**
  * Domain service for zero-PII control-plane orchestration.
  */
@@ -59,9 +63,11 @@ export class ControlPlaneService {
       certificate: {
         request_id: string;
         subject_opaque_id: string;
+        event_type: "SHRED_SUCCESS" | "USER_HARD_DELETED";
         method: string;
         legal_framework: string;
         shredded_at: string;
+        final_worm_hash: string;
         signature: {
           algorithm: string;
           key_id: string;
@@ -395,7 +401,7 @@ export class ControlPlaneService {
       });
     }
 
-    const payloadBytes = new TextEncoder().encode(JSON.stringify(input.payload)).byteLength;
+    const payloadBytes = new TextEncoder().encode(canonicalJsonStringify(input.payload)).byteLength;
     if (payloadBytes > this.maxOutboxPayloadBytes) {
       fail({
         code: "API_OUTBOX_PAYLOAD_TOO_LARGE",
@@ -419,7 +425,7 @@ export class ControlPlaneService {
       });
     }
 
-    const expectedCurrentHash = await computeWormHash(input.previous_hash, input.payload, input.idempotency_key);
+    const expectedCurrentHash = await computeWormHash(input.previous_hash, input.payload);
     if (expectedCurrentHash !== input.current_hash) {
       fail({
         code: "API_OUTBOX_CURRENT_HASH_INVALID",
@@ -460,13 +466,15 @@ export class ControlPlaneService {
 
     if (input.event_type === "SHRED_SUCCESS" || input.event_type === "USER_HARD_DELETED") {
       const shreddedAt = new Date(input.event_timestamp);
+      const method = resolveCertificateMethod(input.event_type);
       const certificatePayload = {
         request_id: job.id,
         subject_opaque_id: job.subject_opaque_id,
-        method:
-          input.event_type === "SHRED_SUCCESS" ? "CRYPTO_SHREDDING_DEK_DELETE" : "DIRECT_DELETE_ROOT_ROW",
+        event_type: input.event_type,
+        method,
         legal_framework: job.legal_framework,
         shredded_at: shreddedAt.toISOString(),
+        final_worm_hash: input.current_hash,
       };
       const signature = await this.signer.sign(certificatePayload);
 
@@ -479,8 +487,7 @@ export class ControlPlaneService {
       await this.repository.insertCertificate({
         requestId: job.id,
         subjectOpaqueId: job.subject_opaque_id,
-        method:
-          input.event_type === "SHRED_SUCCESS" ? "CRYPTO_SHREDDING_DEK_DELETE" : "DIRECT_DELETE_ROOT_ROW",
+        method,
         legalFramework: job.legal_framework,
         shreddedAt,
         payload: certificatePayload,
@@ -500,10 +507,11 @@ export class ControlPlaneService {
           certificate: {
             request_id: job.id,
             subject_opaque_id: job.subject_opaque_id,
-            method:
-              input.event_type === "SHRED_SUCCESS" ? "CRYPTO_SHREDDING_DEK_DELETE" : "DIRECT_DELETE_ROOT_ROW",
+            event_type: input.event_type,
+            method,
             legal_framework: job.legal_framework,
             shredded_at: shreddedAt.toISOString(),
+            final_worm_hash: input.current_hash,
             signature: {
               algorithm: signature.algorithm,
               key_id: signature.keyId,

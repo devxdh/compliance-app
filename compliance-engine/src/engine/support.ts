@@ -1,6 +1,6 @@
 import postgres from "postgres";
 import { generateHMAC } from "../crypto/hmac";
-import { assertIdentifier, quoteQualifiedIdentifier } from "../db/identifiers";
+import { assertIdentifier } from "../db/identifiers";
 import type { WorkerSchemas, WorkerSecrets } from "./contracts";
 import { sha256Hex } from "../utils/digest";
 import { canonicalJsonStringify } from "../utils/json";
@@ -203,28 +203,6 @@ export function assertWorkerSecrets(secrets: WorkerSecrets): { kek: Uint8Array; 
 }
 
 /**
- * Computes retention and pre-erasure notice boundaries using UTC arithmetic.
- *
- * @param now - Evaluation anchor timestamp.
- * @param retentionYears - Legal retention duration in years.
- * @param noticeWindowHours - Notice lead-time in hours before retention expiry.
- * @returns `retentionExpiry` and `notificationDueAt` timestamps.
- */
-export function calculateRetentionWindow(now: Date, retentionYears: number, noticeWindowHours: number) {
-  const retentionExpiry = new Date(now);
-  retentionExpiry.setUTCFullYear(retentionExpiry.getUTCFullYear() + retentionYears);
-
-  const notificationDueAt = new Date(
-    Math.max(now.getTime(), retentionExpiry.getTime() - noticeWindowHours * 60 * 60 * 1000)
-  );
-
-  return {
-    retentionExpiry,
-    notificationDueAt,
-  };
-}
-
-/**
  * Produces a deterministic subject hash used as the worker's irreversible lookup key.
  *
  * @param rootId - Subject identifier in source schema.
@@ -267,16 +245,6 @@ export async function createPseudonym(
 }
 
 /**
- * Builds the parameterized SQL statement used by `getVaultRecordByUserId`.
- *
- * @param engineSchema - Worker engine schema.
- * @returns SQL text with positional parameters for root identity lookup.
- */
-export function buildUserLookupSql(engineSchema: string): string {
-  return `SELECT * FROM ${quoteQualifiedIdentifier(engineSchema, "pii_vault")} WHERE root_schema = $1 AND root_table = $2 AND root_id = $3 AND tenant_id = $4`;
-}
-
-/**
  * Fetches a vault row by root identity tuple.
  *
  * Lookup uses `(root_schema, root_table, root_id, tenant_id)` to avoid cross-tenant collisions.
@@ -297,12 +265,14 @@ export async function getVaultRecordByUserId(
   rootTable: string = "users",
   tenantId?: string
 ): Promise<VaultRecord | null> {
-  const rows = await sql.unsafe<VaultRecord[]>(buildUserLookupSql(engineSchema), [
-    appSchema,
-    rootTable,
-    userId.toString(),
-    tenantId ?? "",
-  ]);
+  const rows = await sql<VaultRecord[]>`
+    SELECT *
+    FROM ${sql(engineSchema)}.pii_vault
+    WHERE root_schema = ${appSchema}
+      AND root_table = ${rootTable}
+      AND root_id = ${userId.toString()}
+      AND tenant_id = ${tenantId ?? ""}
+  `;
   return rows[0] ?? null;
 }
 
@@ -380,7 +350,7 @@ export async function enqueueOutboxEvent(
   `;
 
   const previousHash = tail?.current_hash ?? "GENESIS";
-  const currentHash = await sha256Hex(`${previousHash}${serializedPayload}${idempotencyKey}`);
+  const currentHash = await sha256Hex(`${previousHash}${serializedPayload}`);
 
   const [inserted] = await sql<OutboxRow[]>`
     INSERT INTO ${sql(engineSchema)}.outbox (
