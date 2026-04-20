@@ -67,8 +67,8 @@ describe("Control Plane API (Integration)", () => {
     };
   }
 
-  async function computeCurrentHash(previousHash: string, payload: unknown): Promise<string> {
-    return computeWormHash(previousHash, payload);
+  async function computeCurrentHash(previousHash: string, payload: unknown, idempotencyKey: string): Promise<string> {
+    return computeWormHash(previousHash, payload, idempotencyKey);
   }
 
   it("rejects undeclared PII fields, direct identifiers, and missing mandatory actor metadata", async () => {
@@ -118,6 +118,60 @@ describe("Control Plane API (Integration)", () => {
       }),
     });
     expect(missingActorResponse.status).toBe(400);
+  });
+
+  it("applies secure response headers and normalizes untrusted request ids", async () => {
+    const { app } = await setup();
+
+    const response = await app.request("/health", {
+      headers: {
+        "x-request-id": "invalid/request?id",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("x-frame-options")).toBeTruthy();
+    expect(response.headers.get("x-request-id")).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+  });
+
+  it("rejects webhook targets that violate Control Plane SSRF guardrails", async () => {
+    const { app } = await setup();
+
+    const insecureProtocol = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        buildErasureRequest({
+          webhook_url: "http://client.example.com/hooks/dpdp",
+        })
+      ),
+    });
+    expect(insecureProtocol.status).toBe(400);
+
+    const loopbackHost = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        buildErasureRequest({
+          webhook_url: "https://127.0.0.1/hooks/dpdp",
+        })
+      ),
+    });
+    expect(loopbackHost.status).toBe(400);
+
+    const credentialedUrl = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        buildErasureRequest({
+          webhook_url: "https://user:pass@client.example.com/hooks/dpdp",
+        })
+      ),
+    });
+    expect(credentialedUrl.status).toBe(400);
   });
 
   it("reuses the same cooldown timer on idempotent create replay", async () => {
@@ -457,6 +511,12 @@ describe("Control Plane API (Integration)", () => {
     });
     const created = (await createResponse.json()) as { request_id: string; task_id: string };
 
+    const leaseResponse = await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+    expect(leaseResponse.status).toBe(200);
+
     const ackResponse = await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
       method: "POST",
       headers: {
@@ -484,7 +544,7 @@ describe("Control Plane API (Integration)", () => {
       retention_expiry: "2036-04-19T10:00:00.000Z",
     };
     const idempotencyKey = `vault:${created.request_id}`;
-    const currentHash = await computeCurrentHash("GENESIS", payload);
+    const currentHash = await computeCurrentHash("GENESIS", payload, idempotencyKey);
 
     const outboxResponse = await app.request("/api/v1/worker/outbox", {
       method: "POST",
@@ -562,7 +622,8 @@ describe("Control Plane API (Integration)", () => {
       notification_due_at: "2036-04-17T10:00:00.000Z",
       retention_expiry: "2036-04-19T10:00:00.000Z",
     };
-    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload);
+    const idempotencyKey = `vault:${created.request_id}`;
+    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload, idempotencyKey);
     const vaultResponse = await app.request("/api/v1/worker/outbox", {
       method: "POST",
       headers: {
@@ -570,7 +631,7 @@ describe("Control Plane API (Integration)", () => {
         ...buildWorkerAuthHeaders(),
       },
       body: JSON.stringify({
-        idempotency_key: `vault:${created.request_id}`,
+        idempotency_key: idempotencyKey,
         request_id: created.request_id,
         subject_opaque_id: request.subject_opaque_id,
         event_type: "USER_VAULTED",
@@ -651,7 +712,7 @@ describe("Control Plane API (Integration)", () => {
       notification_due_at: "2036-04-17T10:00:00.000Z",
       retention_expiry: "2036-04-19T10:00:00.000Z",
     };
-    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload);
+    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload, `vault:${created.request_id}`);
     await app.request("/api/v1/worker/outbox", {
       method: "POST",
       headers: {
@@ -680,7 +741,7 @@ describe("Control Plane API (Integration)", () => {
       event_timestamp: "2036-04-17T10:00:00.000Z",
       sent_at: "2036-04-17T10:00:00.000Z",
     };
-    const noticeHash = await computeCurrentHash(vaultHash, noticePayload);
+    const noticeHash = await computeCurrentHash(vaultHash, noticePayload, `notice:${created.request_id}`);
     const noticeResponse = await app.request("/api/v1/worker/outbox", {
       method: "POST",
       headers: {
@@ -738,6 +799,12 @@ describe("Control Plane API (Integration)", () => {
     });
     const created = (await createResponse.json()) as { request_id: string; task_id: string };
 
+    const leaseResponse = await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+    expect(leaseResponse.status).toBe(200);
+
     await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
       method: "POST",
       headers: {
@@ -762,7 +829,7 @@ describe("Control Plane API (Integration)", () => {
       retention_expiry: "2036-04-19T10:00:00.000Z",
     };
     const vaultIdempotencyKey = `vault:${created.request_id}`;
-    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload);
+    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload, vaultIdempotencyKey);
     await app.request("/api/v1/worker/outbox", {
       method: "POST",
       headers: {
@@ -781,6 +848,36 @@ describe("Control Plane API (Integration)", () => {
       }),
     });
 
+    const noticePayload = {
+      request_id: created.request_id,
+      subject_opaque_id: request.subject_opaque_id,
+      trigger_source: request.trigger_source,
+      legal_framework: request.legal_framework,
+      actor_opaque_id: request.actor_opaque_id,
+      applied_rule_name: "PMLA_FINANCIAL",
+      event_timestamp: "2036-04-17T10:00:00.000Z",
+      sent_at: "2036-04-17T10:00:00.000Z",
+    };
+    const noticeHash = await computeCurrentHash(vaultHash, noticePayload, `notice:${created.request_id}`);
+    const noticeResponse = await app.request("/api/v1/worker/outbox", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        idempotency_key: `notice:${created.request_id}`,
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        event_type: "NOTIFICATION_SENT",
+        payload: noticePayload,
+        previous_hash: vaultHash,
+        current_hash: noticeHash,
+        event_timestamp: "2036-04-17T10:00:00.000Z",
+      }),
+    });
+    expect(noticeResponse.status).toBe(202);
+
     const shredPayload = {
       request_id: created.request_id,
       subject_opaque_id: request.subject_opaque_id,
@@ -792,7 +889,7 @@ describe("Control Plane API (Integration)", () => {
       shredded_at: "2036-04-19T10:00:00.000Z",
     };
     const shredIdempotencyKey = `shred:${created.request_id}`;
-    const shredHash = await computeCurrentHash(vaultHash, shredPayload);
+    const shredHash = await computeCurrentHash(noticeHash, shredPayload, shredIdempotencyKey);
     const shredResponse = await app.request("/api/v1/worker/outbox", {
       method: "POST",
       headers: {
@@ -805,7 +902,7 @@ describe("Control Plane API (Integration)", () => {
         subject_opaque_id: request.subject_opaque_id,
         event_type: "SHRED_SUCCESS",
         payload: shredPayload,
-        previous_hash: vaultHash,
+        previous_hash: noticeHash,
         current_hash: shredHash,
         event_timestamp: "2036-04-19T10:00:00.000Z",
       }),
@@ -846,6 +943,118 @@ describe("Control Plane API (Integration)", () => {
     ).toBe(true);
   });
 
+  it("rejects out-of-order worker terminal events before the notice stage", async () => {
+    const { app } = await setup();
+    const request = buildErasureRequest({
+      subject_opaque_id: "usr_out_of_order",
+      cooldown_days: 0,
+    });
+    const createResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const created = (await createResponse.json()) as { request_id: string };
+
+    const shredPayload = {
+      request_id: created.request_id,
+      subject_opaque_id: request.subject_opaque_id,
+      trigger_source: request.trigger_source,
+      legal_framework: request.legal_framework,
+      actor_opaque_id: request.actor_opaque_id,
+      applied_rule_name: "DEFAULT",
+      event_timestamp: "2036-04-19T10:00:00.000Z",
+      shredded_at: "2036-04-19T10:00:00.000Z",
+    };
+    const shredIdempotencyKey = `shred:${created.request_id}`;
+    const shredHash = await computeCurrentHash("GENESIS", shredPayload, shredIdempotencyKey);
+
+    const shredResponse = await app.request("/api/v1/worker/outbox", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        idempotency_key: shredIdempotencyKey,
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        event_type: "SHRED_SUCCESS",
+        payload: shredPayload,
+        previous_hash: "GENESIS",
+        current_hash: shredHash,
+        event_timestamp: "2036-04-19T10:00:00.000Z",
+      }),
+    });
+
+    expect(shredResponse.status).toBe(409);
+  });
+
+  it("rejects worker outbox metadata that diverges from the original legal contract", async () => {
+    const { app } = await setup();
+    const request = buildErasureRequest({
+      subject_opaque_id: "usr_metadata_conflict",
+      cooldown_days: 0,
+    });
+    const createResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    const created = (await createResponse.json()) as { request_id: string; task_id: string };
+
+    await app.request("/api/v1/worker/sync", {
+      method: "GET",
+      headers: buildWorkerAuthHeaders(),
+    });
+
+    await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        status: "completed",
+        result: { action: "vaulted" },
+      }),
+    });
+
+    const vaultPayload = {
+      request_id: created.request_id,
+      subject_opaque_id: request.subject_opaque_id,
+      trigger_source: request.trigger_source,
+      legal_framework: "PMLA",
+      actor_opaque_id: request.actor_opaque_id,
+      applied_rule_name: "DEFAULT",
+      event_timestamp: "2026-04-19T10:00:00.000Z",
+      retention_expiry: "2026-04-20T10:00:00.000Z",
+      notification_due_at: "2026-04-19T12:00:00.000Z",
+    };
+    const vaultIdempotencyKey = `vault:${created.request_id}`;
+    const vaultHash = await computeCurrentHash("GENESIS", vaultPayload, vaultIdempotencyKey);
+
+    const outboxResponse = await app.request("/api/v1/worker/outbox", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        idempotency_key: vaultIdempotencyKey,
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        event_type: "USER_VAULTED",
+        payload: vaultPayload,
+        previous_hash: "GENESIS",
+        current_hash: vaultHash,
+        event_timestamp: "2026-04-19T10:00:00.000Z",
+      }),
+    });
+
+    expect(outboxResponse.status).toBe(409);
+  });
+
   it("dispatches terminal webhook payload when webhook_url is configured", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ ok: true }), {
@@ -868,6 +1077,12 @@ describe("Control Plane API (Integration)", () => {
       });
       const created = (await createResponse.json()) as { request_id: string; task_id: string };
 
+      const leaseResponse = await app.request("/api/v1/worker/sync", {
+        method: "GET",
+        headers: buildWorkerAuthHeaders(),
+      });
+      expect(leaseResponse.status).toBe(200);
+
       await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
         method: "POST",
         headers: {
@@ -880,6 +1095,67 @@ describe("Control Plane API (Integration)", () => {
         }),
       });
 
+      const vaultPayload = {
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        trigger_source: request.trigger_source,
+        legal_framework: request.legal_framework,
+        actor_opaque_id: request.actor_opaque_id,
+        applied_rule_name: "PMLA_FINANCIAL",
+        event_timestamp: "2026-04-19T10:00:00.000Z",
+        notification_due_at: "2036-04-17T10:00:00.000Z",
+        retention_expiry: "2036-04-19T10:00:00.000Z",
+      };
+      const vaultHash = await computeCurrentHash("GENESIS", vaultPayload, `vault:${created.request_id}`);
+      const vaultResponse = await app.request("/api/v1/worker/outbox", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...buildWorkerAuthHeaders(),
+        },
+        body: JSON.stringify({
+          idempotency_key: `vault:${created.request_id}`,
+          request_id: created.request_id,
+          subject_opaque_id: request.subject_opaque_id,
+          event_type: "USER_VAULTED",
+          payload: vaultPayload,
+          previous_hash: "GENESIS",
+          current_hash: vaultHash,
+          event_timestamp: "2026-04-19T10:00:00.000Z",
+        }),
+      });
+      expect(vaultResponse.status).toBe(202);
+
+      const noticePayload = {
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        trigger_source: request.trigger_source,
+        legal_framework: request.legal_framework,
+        actor_opaque_id: request.actor_opaque_id,
+        applied_rule_name: "PMLA_FINANCIAL",
+        event_timestamp: "2036-04-17T10:00:00.000Z",
+        sent_at: "2036-04-17T10:00:00.000Z",
+      };
+      const noticeHash = await computeCurrentHash(vaultHash, noticePayload, `notice:${created.request_id}`);
+      const noticeResponse = await app.request("/api/v1/worker/outbox", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...buildWorkerAuthHeaders(),
+        },
+        body: JSON.stringify({
+          idempotency_key: `notice:${created.request_id}`,
+          request_id: created.request_id,
+          subject_opaque_id: request.subject_opaque_id,
+          event_type: "NOTIFICATION_SENT",
+          payload: noticePayload,
+          previous_hash: vaultHash,
+          current_hash: noticeHash,
+          event_timestamp: "2036-04-17T10:00:00.000Z",
+        }),
+      });
+      expect(noticeResponse.status).toBe(202);
+
       const shredPayload = {
         request_id: created.request_id,
         subject_opaque_id: request.subject_opaque_id,
@@ -891,7 +1167,7 @@ describe("Control Plane API (Integration)", () => {
         shredded_at: "2036-04-19T10:00:00.000Z",
       };
       const shredIdempotencyKey = `shred:${created.request_id}`;
-      const shredHash = await computeCurrentHash("GENESIS", shredPayload);
+      const shredHash = await computeCurrentHash(noticeHash, shredPayload, shredIdempotencyKey);
 
       const shredResponse = await app.request("/api/v1/worker/outbox", {
         method: "POST",
@@ -905,17 +1181,18 @@ describe("Control Plane API (Integration)", () => {
           subject_opaque_id: request.subject_opaque_id,
           event_type: "SHRED_SUCCESS",
           payload: shredPayload,
-          previous_hash: "GENESIS",
+          previous_hash: noticeHash,
           current_hash: shredHash,
           event_timestamp: "2036-04-19T10:00:00.000Z",
         }),
       });
       expect(shredResponse.status).toBe(202);
       expect(fetchSpy).toHaveBeenCalledWith(
-        webhookUrl,
+        new URL(webhookUrl),
         expect.objectContaining({
           method: "POST",
           headers: expect.objectContaining({ "content-type": "application/json" }),
+          redirect: "error",
         })
       );
     } finally {
@@ -953,6 +1230,12 @@ describe("Control Plane API (Integration)", () => {
       });
       const created = (await createResponse.json()) as { request_id: string; task_id: string };
 
+      const leaseResponse = await app.request("/api/v1/worker/sync", {
+        method: "GET",
+        headers: buildWorkerAuthHeaders(),
+      });
+      expect(leaseResponse.status).toBe(200);
+
       await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
         method: "POST",
         headers: {
@@ -964,6 +1247,67 @@ describe("Control Plane API (Integration)", () => {
           result: { action: "vaulted" },
         }),
       });
+
+      const vaultPayload = {
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        trigger_source: request.trigger_source,
+        legal_framework: request.legal_framework,
+        actor_opaque_id: request.actor_opaque_id,
+        applied_rule_name: "PMLA_FINANCIAL",
+        event_timestamp: "2026-04-19T10:00:00.000Z",
+        notification_due_at: "2036-04-17T10:00:00.000Z",
+        retention_expiry: "2036-04-19T10:00:00.000Z",
+      };
+      const vaultHash = await computeCurrentHash("GENESIS", vaultPayload, `vault:${created.request_id}`);
+      const vaultResponse = await app.request("/api/v1/worker/outbox", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...buildWorkerAuthHeaders(),
+        },
+        body: JSON.stringify({
+          idempotency_key: `vault:${created.request_id}`,
+          request_id: created.request_id,
+          subject_opaque_id: request.subject_opaque_id,
+          event_type: "USER_VAULTED",
+          payload: vaultPayload,
+          previous_hash: "GENESIS",
+          current_hash: vaultHash,
+          event_timestamp: "2026-04-19T10:00:00.000Z",
+        }),
+      });
+      expect(vaultResponse.status).toBe(202);
+
+      const noticePayload = {
+        request_id: created.request_id,
+        subject_opaque_id: request.subject_opaque_id,
+        trigger_source: request.trigger_source,
+        legal_framework: request.legal_framework,
+        actor_opaque_id: request.actor_opaque_id,
+        applied_rule_name: "PMLA_FINANCIAL",
+        event_timestamp: "2036-04-17T10:00:00.000Z",
+        sent_at: "2036-04-17T10:00:00.000Z",
+      };
+      const noticeHash = await computeCurrentHash(vaultHash, noticePayload, `notice:${created.request_id}`);
+      const noticeResponse = await app.request("/api/v1/worker/outbox", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...buildWorkerAuthHeaders(),
+        },
+        body: JSON.stringify({
+          idempotency_key: `notice:${created.request_id}`,
+          request_id: created.request_id,
+          subject_opaque_id: request.subject_opaque_id,
+          event_type: "NOTIFICATION_SENT",
+          payload: noticePayload,
+          previous_hash: vaultHash,
+          current_hash: noticeHash,
+          event_timestamp: "2036-04-17T10:00:00.000Z",
+        }),
+      });
+      expect(noticeResponse.status).toBe(202);
 
       const shredPayload = {
         request_id: created.request_id,
@@ -981,8 +1325,8 @@ describe("Control Plane API (Integration)", () => {
         subject_opaque_id: request.subject_opaque_id,
         event_type: "SHRED_SUCCESS",
         payload: shredPayload,
-        previous_hash: "GENESIS",
-        current_hash: await computeCurrentHash("GENESIS", shredPayload),
+        previous_hash: noticeHash,
+        current_hash: await computeCurrentHash(noticeHash, shredPayload, `shred:${created.request_id}`),
         event_timestamp: "2036-04-19T10:00:00.000Z",
       };
 

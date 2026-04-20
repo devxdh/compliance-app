@@ -37,10 +37,11 @@ export function canonicalJsonStringify(value: unknown): string {
  *
  * @param previousHash - Prior chain hash or `GENESIS`.
  * @param payload - Event payload body.
+ * @param idempotencyKey - Event idempotency key.
  * @returns Chain hash for the current event.
  */
-export async function computeWormHash(previousHash: string, payload: unknown): Promise<string> {
-  const data = new TextEncoder().encode(`${previousHash}${canonicalJsonStringify(payload)}`);
+export async function computeWormHash(previousHash: string, payload: unknown, idempotencyKey: string): Promise<string> {
+  const data = new TextEncoder().encode(`${previousHash}${canonicalJsonStringify(payload)}${idempotencyKey}`);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
   return toHex(digest);
 }

@@ -94,7 +94,7 @@ Before calculating the $O(V+E)$ relational dependency graph, the Worker executes
 
 ### 6.1 The Cryptographic Chain of Custody
 Every action the Worker takes generates an event pushed to the API. The API chains them:
-$Current\_Hash = \text{SHA256}(Previous\_Hash + Payload)$
+$Current\_Hash = \text{SHA256}(Previous\_Hash + canonical\_JSON(Payload) + idempotency\_key)$
 
 If a malicious DBA alters a vaulting log from 3 years ago to cover up a compliance failure, the subsequent hashes will mathematically break, instantly alerting an auditor to the tamper event.
 
@@ -195,8 +195,13 @@ The API is the absolute arbiter of time and state.
 
 ### 5.2 WORM Hash Chaining & Certification
 * **Mechanism:** Hash chaining enforces temporal immutability. 
-$H_n = \text{SHA256}(H_{n-1} \parallel Payload_n)$
+$H_n = \text{SHA256}(H_{n-1} \parallel canonical\_JSON(Payload_n) \parallel idempotency\_key)$
+* **Zero-Trust State Transition Rule:** A valid hash alone is insufficient. The Control Plane also verifies that worker outbox metadata still matches the immutable request contract and that lifecycle events arrive strictly in order (`EXECUTING -> VAULTED -> NOTICE_SENT -> SHREDDED`, with `USER_HARD_DELETED` as the direct terminal fast-path from `EXECUTING`).
 * **Issuance:** Upon receiving a `SHRED_SUCCESS` payload, the API signs $H_n$ utilizing `globalThis.crypto` Ed25519 asymmetric cryptography. This outputs the definitive JSON Certificate of Erasure.
+
+### 5.2.1 Webhook Egress Firewall
+* **Strategic Avoidance:** Client-supplied webhook URLs can become SSRF pivots if the API follows redirects or accepts loopback/private network destinations.
+* **Mechanism:** The Control Plane only accepts `https://` webhook URLs, rejects embedded credentials and special-use literal IP targets, and dispatches with redirect following disabled.
 
 ### 5.3 Disaster Recovery & Dead Letter Queue (DLQ)
 * **Strategic Avoidance:** Infinite retry loops on corrupted tasks.
@@ -326,7 +331,7 @@ The system must mathematically prove compliance to a regulator.
 
 ### 9.1 The Cryptographic Chain of Custody
 Every action generates an event chained via SHA-256: 
-$$H_n = \text{SHA256}(H_{n-1} \parallel Payload_n)$$
+$$H_n = \text{SHA256}(H_{n-1} \parallel canonical\_JSON(Payload_n) \parallel idempotency\_key)$$
 This guarantees non-repudiation. If a malicious DBA alters a vaulting log, subsequent hashes break, instantly alerting auditors.
 
 ### 9.2 The Certificate of Erasure (CoE)

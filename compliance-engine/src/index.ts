@@ -98,6 +98,7 @@ async function main() {
             "content-type": "application/json",
           },
           body: JSON.stringify(message),
+          redirect: "error",
         });
 
         if (!response.ok) {

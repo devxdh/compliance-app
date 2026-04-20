@@ -1,259 +1,28 @@
 import postgres from "postgres";
 import { decryptGCMBytes } from "../crypto/aes";
 import { unwrapKey } from "../crypto/envelope";
-import { assertIdentifier } from "../db/identifiers";
 import { fail } from "../errors";
-import { getLogger, logError } from "../observability/logger";
+import { logError, getLogger } from "../observability/logger";
 import { base64ToBytes } from "../utils/encoding";
-import type { DispatchNoticeOptions, DispatchNoticeResult, WorkerSecrets } from "./contracts";
-import { assertWorkerSecrets, enqueueOutboxEvent, getVaultRecordByUserId, resolveSchemas } from "./support";
-import type { VaultRecord } from "./support";
+import type {
+  DispatchNoticeOptions,
+  DispatchNoticeResult,
+  WorkerSecrets,
+} from "./contracts";
+import {
+  assertWorkerSecrets,
+  enqueueOutboxEvent,
+  getVaultRecordByUserId,
+  resolveSchemas,
+} from "./support";
+import { buildNoticeDryRunPlan, buildNotificationIdempotencyKey, resolveNoticeColumns, resolveNotificationLeaseSeconds } from "./notifier.config";
+import { extractNoticeRecipient } from "./notifier.payload";
+import { clearNoticeLease, reserveNotice } from "./notifier.reservation";
+import type { MockMailer } from "./notifier.types";
 
 const logger = getLogger({ component: "notifier" });
-const textDecoder = new TextDecoder();
 
-export interface MailMessage {
-  to: string;
-  subject: string;
-  body: string;
-  idempotencyKey: string;
-}
-
-/**
- * Mail transport abstraction used by the worker.
- *
- * Implementations must honor `idempotencyKey` to prevent duplicate notices during retries.
- */
-export interface MockMailer {
-  sendEmail(message: MailMessage): Promise<void>;
-}
-
-interface NoticeReservation {
-  action: "send" | "already_sent" | "not_due";
-  vault: VaultRecord;
-  encryptedDek?: Uint8Array;
-  lockId?: string;
-}
-
-function resolveNotificationLeaseSeconds(value?: number): number {
-  if (value === undefined) {
-    return 120;
-  }
-
-  if (!Number.isInteger(value) || value < 1) {
-    fail({
-      code: "DPDP_NOTIFICATION_LEASE_INVALID",
-      title: "Invalid notification lease",
-      detail: "notificationLeaseSeconds must be an integer greater than 0.",
-      category: "validation",
-      retryable: false,
-    });
-  }
-
-  return value;
-}
-
-function buildNotificationIdempotencyKey(vault: VaultRecord): string {
-  return vault.request_id
-    ? `notice:${vault.request_id}:${vault.notification_due_at.toISOString()}`
-    : `notice:${vault.root_schema}:${vault.root_table}:${vault.root_id}:${vault.notification_due_at.toISOString()}`;
-}
-
-function resolveNoticeColumns(options: DispatchNoticeOptions): { emailColumn: string; nameColumn?: string } {
-  if (options.noticeEmailColumn) {
-    return {
-      emailColumn: assertIdentifier(options.noticeEmailColumn, "graph notice email column"),
-      nameColumn: options.noticeNameColumn
-        ? assertIdentifier(options.noticeNameColumn, "graph notice name column")
-        : undefined,
-    };
-  }
-
-  const configuredColumns = new Set(Object.keys(options.rootPiiColumns ?? {}));
-  if (configuredColumns.size === 0) {
-    return {
-      emailColumn: "email",
-      nameColumn: "full_name",
-    };
-  }
-
-  if (configuredColumns.has("email")) {
-    return {
-      emailColumn: "email",
-      nameColumn: configuredColumns.has("full_name") ? "full_name" : undefined,
-    };
-  }
-
-  fail({
-    code: "DPDP_NOTIFICATION_EMAIL_COLUMN_MISSING",
-    title: "Missing notice email column mapping",
-    detail:
-      "noticeEmailColumn is required when root_pii_columns does not contain 'email'. Configure graph.notice_email_column in compliance.worker.yml.",
-    category: "configuration",
-    retryable: false,
-    fatal: true,
-  });
-}
-
-function buildNoticeDryRunPlan(
-  appSchema: string,
-  engineSchema: string,
-  rootTable: string,
-  subjectId: string | number,
-  userHash: string,
-  notificationDueAt: Date,
-  retentionExpiry: Date
-) {
-  return {
-    mode: "dry-run" as const,
-    summary: `Would attempt the pre-erasure notice for root row ${subjectId} (${userHash}).`,
-    checks: [
-      `Read ${engineSchema}.pii_vault using (${appSchema}, ${rootTable}, ${subjectId}) as the lookup key.`,
-      `Verify that now is between notification_due_at (${notificationDueAt.toISOString()}) and retention_expiry (${retentionExpiry.toISOString()}).`,
-      "Acquire a short notification lease before decrypting or sending mail.",
-      "Use a deterministic mail idempotency key so retries do not duplicate sends.",
-      "Write the outbox event only after the mailer succeeds.",
-    ],
-    cryptoSteps: [
-      "Unwrap the stored DEK with the worker KEK.",
-      "Decrypt the vaulted JSON payload in memory only.",
-      "Null and overwrite temporary buffers after the email path completes.",
-    ],
-    sqlSteps: [
-      `SELECT * FROM ${engineSchema}.pii_vault WHERE root_schema = '${appSchema}' AND root_table = '${rootTable}' AND root_id = '${subjectId}' FOR UPDATE;`,
-      `UPDATE ${engineSchema}.pii_vault SET notification_lock_id = '<uuid>', notification_lock_expires_at = '<lease-expiry>';`,
-      `SELECT * FROM ${engineSchema}.user_keys WHERE user_uuid_hash = '<user-hash>';`,
-      `UPDATE ${engineSchema}.pii_vault SET notification_sent_at = '<timestamp>', notification_lock_id = NULL, notification_lock_expires_at = NULL;`,
-      `INSERT INTO ${engineSchema}.outbox (...) VALUES (... 'NOTIFICATION_SENT' ...);`,
-    ],
-  };
-}
-
-async function reserveNotice(
-  sql: postgres.Sql,
-  engineSchema: string,
-  appSchema: string,
-  rootTable: string,
-  subjectId: string | number,
-  now: Date,
-  leaseSeconds: number
-): Promise<NoticeReservation> {
-  const normalizedSubjectId = String(subjectId);
-
-  return sql.begin("isolation level repeatable read", async (tx) => {
-    await tx.unsafe("SET LOCAL lock_timeout = '5s'");
-
-    const [vault] = await tx<VaultRecord[]>`
-      SELECT *
-      FROM ${tx(engineSchema)}.pii_vault
-      WHERE root_schema = ${appSchema}
-        AND root_table = ${rootTable}
-        AND root_id = ${normalizedSubjectId}
-      FOR UPDATE
-    `;
-
-    if (!vault) {
-      fail({
-        code: "DPDP_VAULT_NOT_FOUND",
-        title: "Vault record not found",
-        detail: `Vault record not found for ${appSchema}.${rootTable}#${normalizedSubjectId}.`,
-        category: "validation",
-        retryable: false,
-      });
-    }
-
-    if (vault.shredded_at) {
-      fail({
-        code: "DPDP_NOTIFICATION_SHREDDED",
-        title: "Notification cannot be sent after shredding",
-        detail: `Cannot dispatch notice for root row ${normalizedSubjectId}: the vault has already been shredded.`,
-        category: "validation",
-        retryable: false,
-      });
-    }
-
-    if (vault.notification_sent_at) {
-      return { action: "already_sent", vault };
-    }
-
-    if (now < new Date(vault.notification_due_at)) {
-      return { action: "not_due", vault };
-    }
-
-    if (now >= new Date(vault.retention_expiry)) {
-      fail({
-        code: "DPDP_NOTIFICATION_WINDOW_MISSED",
-        title: "Notification window has closed",
-        detail: `Cannot dispatch notice for root row ${normalizedSubjectId}: the retention deadline has already expired.`,
-        category: "validation",
-        retryable: false,
-      });
-    }
-
-    if (vault.notification_lock_expires_at && new Date(vault.notification_lock_expires_at) > now) {
-      fail({
-        code: "DPDP_NOTIFICATION_ALREADY_LEASED",
-        title: "Notification is already leased",
-        detail: `Notification for root row ${normalizedSubjectId} is already leased by another worker.`,
-        category: "concurrency",
-        retryable: true,
-      });
-    }
-
-    const lockId = globalThis.crypto.randomUUID();
-    const lockExpiry = new Date(now.getTime() + leaseSeconds * 1000);
-
-    await tx`
-      UPDATE ${tx(engineSchema)}.pii_vault
-      SET notification_lock_id = ${lockId},
-          notification_lock_expires_at = ${lockExpiry},
-          updated_at = ${now}
-      WHERE user_uuid_hash = ${vault.user_uuid_hash}
-    `;
-
-    const [keyRow] = await tx<{ encrypted_dek: Uint8Array }[]>`
-      SELECT encrypted_dek
-      FROM ${tx(engineSchema)}.user_keys
-      WHERE user_uuid_hash = ${vault.user_uuid_hash}
-      FOR UPDATE
-    `;
-
-    if (!keyRow) {
-      fail({
-        code: "DPDP_KEY_RING_NOT_FOUND",
-        title: "Key ring record not found",
-        detail: `Key ring record not found for user hash ${vault.user_uuid_hash}.`,
-        category: "integrity",
-        retryable: false,
-        fatal: true,
-      });
-    }
-
-    return {
-      action: "send",
-      vault,
-      encryptedDek: new Uint8Array(keyRow.encrypted_dek),
-      lockId,
-    };
-  });
-}
-
-async function clearNoticeLease(
-  sql: postgres.Sql,
-  engineSchema: string,
-  userHash: string,
-  lockId: string,
-  now: Date
-) {
-  await sql`
-    UPDATE ${sql(engineSchema)}.pii_vault
-    SET notification_lock_id = NULL,
-        notification_lock_expires_at = NULL,
-        updated_at = ${now}
-    WHERE user_uuid_hash = ${userHash}
-      AND notification_lock_id = ${lockId}
-  `;
-}
+export type { MailMessage, MockMailer } from "./notifier.types";
 
 /**
  * Dispatches the pre-erasure notice for a vaulted subject.
@@ -264,11 +33,11 @@ async function clearNoticeLease(
  * - Sends one deterministic idempotent email.
  * - Emits `NOTIFICATION_SENT` to outbox only after successful mail delivery.
  *
- * @param sql - Postgres pool used for lease + state transitions.
+ * @param sql - Postgres pool used for lease and state transitions.
  * @param subjectId - Root identifier.
  * @param secrets - Worker cryptographic keys used for DEK unwrap/decrypt.
  * @param mailer - Injected mail transport.
- * @param options - Schema and runtime overrides (lease, dry-run, clock).
+ * @param options - Schema and runtime overrides.
  * @returns Notice dispatch result with lifecycle timestamps and outbox classification.
  * @throws {WorkerError} When vault state is invalid, lease is lost, or crypto checks fail.
  */
@@ -279,7 +48,10 @@ export async function dispatchPreErasureNotice(
   mailer: MockMailer,
   options: DispatchNoticeOptions = {}
 ): Promise<DispatchNoticeResult> {
-  if ((typeof subjectId !== "string" && typeof subjectId !== "number") || String(subjectId).trim().length === 0) {
+  if (
+    (typeof subjectId !== "string" && typeof subjectId !== "number") ||
+    String(subjectId).trim().length === 0
+  ) {
     fail({
       code: "DPDP_NOTIFICATION_USER_ID_INVALID",
       title: "Invalid root identifier",
@@ -297,7 +69,13 @@ export async function dispatchPreErasureNotice(
   const leaseSeconds = resolveNotificationLeaseSeconds(options.notificationLeaseSeconds);
   const noticeColumns = resolveNoticeColumns(options);
 
-  const vault = await getVaultRecordByUserId(sql, engineSchema, appSchema, normalizedSubjectId, rootTable);
+  const vault = await getVaultRecordByUserId(
+    sql,
+    engineSchema,
+    appSchema,
+    normalizedSubjectId,
+    rootTable
+  );
   if (!vault) {
     fail({
       code: "DPDP_VAULT_NOT_FOUND",
@@ -315,7 +93,9 @@ export async function dispatchPreErasureNotice(
       dryRun: true,
       retentionExpiry: vault.retention_expiry.toISOString(),
       notificationDueAt: vault.notification_due_at.toISOString(),
-      notificationSentAt: vault.notification_sent_at ? vault.notification_sent_at.toISOString() : null,
+      notificationSentAt: vault.notification_sent_at
+        ? vault.notification_sent_at.toISOString()
+        : null,
       outboxEventType: "NOTIFICATION_SENT",
       plan: buildNoticeDryRunPlan(
         appSchema,
@@ -352,7 +132,8 @@ export async function dispatchPreErasureNotice(
         dryRun: false,
         retentionExpiry: reservation.vault.retention_expiry.toISOString(),
         notificationDueAt: reservation.vault.notification_due_at.toISOString(),
-        notificationSentAt: reservation.vault.notification_sent_at?.toISOString() ?? null,
+        notificationSentAt:
+          reservation.vault.notification_sent_at?.toISOString() ?? null,
         outboxEventType: null,
       };
     }
@@ -363,7 +144,9 @@ export async function dispatchPreErasureNotice(
         userHash: reservation.vault.user_uuid_hash,
         dryRun: false,
         retentionExpiry: reservation.vault.retention_expiry.toISOString(),
-        notificationDueAt: new Date(reservation.vault.notification_due_at).toISOString(),
+        notificationDueAt: new Date(
+          reservation.vault.notification_due_at
+        ).toISOString(),
         notificationSentAt: null,
         outboxEventType: null,
       };
@@ -386,28 +169,17 @@ export async function dispatchPreErasureNotice(
 
     encryptedPayload = base64ToBytes(payload.data);
     decryptedPiiBytes = await decryptGCMBytes(encryptedPayload, dek);
-    const parsed = JSON.parse(textDecoder.decode(decryptedPiiBytes)) as Record<string, unknown>;
-    const emailCandidate = parsed[noticeColumns.emailColumn];
-    const email = typeof emailCandidate === "string" && emailCandidate.trim().length > 0 ? emailCandidate.trim() : null;
-    if (!email) {
-      fail({
-        code: "DPDP_NOTIFICATION_EMAIL_MISSING",
-        title: "Notification email address missing",
-        detail: `Vault payload for root row ${normalizedSubjectId} does not contain ${noticeColumns.emailColumn}.`,
-        category: "integrity",
-        retryable: false,
-      });
-    }
+    const { email, fullName } = extractNoticeRecipient(
+      decryptedPiiBytes,
+      noticeColumns,
+      normalizedSubjectId
+    );
 
-    const nameCandidate = noticeColumns.nameColumn ? parsed[noticeColumns.nameColumn] : undefined;
-    const fullName = typeof nameCandidate === "string" && nameCandidate.trim().length > 0 ? nameCandidate.trim() : "User";
-
-    const mailIdempotencyKey = buildNotificationIdempotencyKey(reservation.vault);
     await mailer.sendEmail({
       to: email,
       subject: "Notice of Permanent Data Erasure",
       body: `Dear ${fullName},\n\nYour data will be permanently anonymized in 48 hours in compliance with the DPDP Act.`,
-      idempotencyKey: mailIdempotencyKey,
+      idempotencyKey: buildNotificationIdempotencyKey(reservation.vault),
     });
 
     await sql.begin("isolation level repeatable read", async (tx) => {
@@ -484,11 +256,16 @@ export async function dispatchPreErasureNotice(
       try {
         await clearNoticeLease(sql, engineSchema, vault.user_uuid_hash, lockId, now);
       } catch (leaseError) {
-        logError(logger, leaseError, "Failed to clear notification lease after notifier error", {
-          userHash: vault.user_uuid_hash,
-          rootTable,
-          rootId: normalizedSubjectId,
-        });
+        logError(
+          logger,
+          leaseError,
+          "Failed to clear notification lease after notifier error",
+          {
+            userHash: vault.user_uuid_hash,
+            rootTable,
+            rootId: normalizedSubjectId,
+          }
+        );
       }
     }
 

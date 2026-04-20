@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { getWebhookUrlViolation } from "./webhook";
 
 const isoDateTime = z.string().datetime();
 const emailLikePattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
@@ -55,7 +56,20 @@ export const createErasureRequestSchema = z
     tenant_id: z.string().min(1).optional(),
     cooldown_days: z.number().int().min(0).default(30),
     shadow_mode: z.boolean().default(false),
-    webhook_url: z.string().url().optional(),
+    webhook_url: z
+      .string()
+      .url()
+      .superRefine((value, ctx) => {
+        const violation = getWebhookUrlViolation(value);
+        if (violation) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: violation.detail,
+            path: ["webhook_url"],
+          });
+        }
+      })
+      .optional(),
   })
   .strict();
 

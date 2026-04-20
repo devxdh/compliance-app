@@ -60,6 +60,7 @@ describe("Fetch Dispatcher Integration", () => {
       "x-client-id": "worker-tenant-1",
       authorization: "Bearer secret-token",
     });
+    expect(callArgs![1].redirect).toBe("error");
     expect(JSON.parse(callArgs![1].body)).toMatchObject({
       idempotency_key: "ik-123",
       event_type: "USER_VAULTED",

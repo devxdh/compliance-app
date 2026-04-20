@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Context, Next } from "hono";
+import { secureHeaders } from "hono/secure-headers";
 import type postgres from "postgres";
 import type { CoeSigner } from "./crypto/coe";
 import { asApiError, serializeApiError } from "./errors";
@@ -26,6 +27,7 @@ export interface CreateAppOptions {
 }
 
 const logger = getLogger({ component: "http" });
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 function getRequestLogger(c: Context) {
   return logger.child({
@@ -36,7 +38,11 @@ function getRequestLogger(c: Context) {
 }
 
 async function requestContextMiddleware(c: Context, next: Next) {
-  const requestId = c.req.header("x-request-id") ?? globalThis.crypto.randomUUID();
+  const incomingRequestId = c.req.header("x-request-id");
+  const requestId =
+    incomingRequestId && REQUEST_ID_PATTERN.test(incomingRequestId)
+      ? incomingRequestId
+      : globalThis.crypto.randomUUID();
   c.set("requestId", requestId);
   c.header("x-request-id", requestId);
 
@@ -83,6 +89,7 @@ export function createApp(options: CreateAppOptions) {
     now: options.now,
   });
 
+  app.use("*", secureHeaders());
   app.use("*", requestContextMiddleware);
 
   app.onError((error, c) => {

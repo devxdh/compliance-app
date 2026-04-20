@@ -8,18 +8,20 @@ describe("Control Plane Hashing", () => {
   });
 
   it("computes deterministic WORM chain hashes", async () => {
-    const digest = await computeWormHash("GENESIS", { eventType: "USER_VAULTED" });
-    expect(digest).toBe("16efd736c8b552bc17934e1c6ae2bc4f0b4d2b7bab4773a445cfe486b16663c1");
+    const digest = await computeWormHash("GENESIS", { eventType: "USER_VAULTED" }, "idempotency_1");
+    expect(digest).toBe("d06c8ddf3262cfa65d87bd0f15ad81d7af6f41985452ce9a937a7bba7ceef089");
   });
 
   it("canonicalizes payload key ordering before hashing", async () => {
     const left = await computeWormHash(
       "GENESIS",
-      { b: "second", a: "first", nested: { y: 2, x: 1 } }
+      { b: "second", a: "first", nested: { y: 2, x: 1 } },
+      "idem_key"
     );
     const right = await computeWormHash(
       "GENESIS",
-      { nested: { x: 1, y: 2 }, a: "first", b: "second" }
+      { nested: { x: 1, y: 2 }, a: "first", b: "second" },
+      "idem_key"
     );
     expect(left).toBe(right);
   });

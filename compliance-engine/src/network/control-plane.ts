@@ -150,6 +150,7 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
     return await fetch(url, {
       ...init,
       signal: controller.signal,
+      redirect: "error",
     });
   } catch (error) {
     throw asWorkerError(error, {

@@ -28,7 +28,7 @@ All operations must adhere to these mathematical primitives:
 * **Envelope Encryption:** A 256-bit AES Master Key (`KEK`) lives strictly in RAM. It wraps 32-byte Data Encrypting Keys (`DEK`) generated uniquely per user.
 * **Encryption Algorithm:** AES-256-GCM (Requires a 12-byte IV and appends a 16-byte Auth Tag for integrity).
 * **Pseudonymization:** HMAC-SHA256. Used to mask public identifiers (e.g., emails) so relational constraints survive without exposing identity.
-* **Tamper-Evident WORM Logging:** The Outbox uses Hash Chaining. $Hash_n = \text{SHA256}(Hash_{n-1} + \text{Payload})$.
+* **Tamper-Evident WORM Logging:** The Outbox uses Hash Chaining. $Hash_n = \text{SHA256}(Hash_{n-1} + \text{canonical\_JSON}(\text{Payload}) + \text{idempotency\_key})$.
 * **Legal Certification:** Ed25519 Digital Signatures used by the API to sign "Certificates of Erasure."
 
 ---
@@ -113,7 +113,12 @@ The API is purely a state coordinator. It provides three core endpoints protecte
 3. **`POST /api/v1/worker/outbox`**
    * **Mechanism:** Ingests the WORM log into `audit_ledger`.
    * **Caveat/Rule:** MUST use `ON CONFLICT (worker_idempotency_key) DO NOTHING` to guarantee idempotency if a worker's network drops and it retries the webhook.
+   * **Zero-Trust Guardrail:** The Control Plane MUST verify that `trigger_source`, `actor_opaque_id`, and `legal_framework` still match the immutable ingestion request, and MUST reject out-of-order worker events that skip lifecycle stages.
    * **Legal Certification:** If `event_type === 'SHRED_SUCCESS'`, it triggers `mintCertificateOfErasure()`, utilizing Web Crypto `Ed25519` to digitally sign the payload and save it as mathematical proof of compliance.
+
+#### 5.3. Webhook Egress Guardrails
+* `webhook_url` is treated as untrusted input even though it is client-supplied.
+* The Control Plane accepts only externally routable `https://` webhook URLs, rejects embedded credentials, rejects loopback/private/special-use literal IP targets, and disables redirect following during delivery to reduce SSRF blast radius.
 
 ---
 
