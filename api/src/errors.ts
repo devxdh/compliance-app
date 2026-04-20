@@ -1,5 +1,6 @@
 import { HTTPException } from "hono/http-exception";
 import { ZodError } from "zod";
+import { formatZodIssues, summarizeZodError, type ApiValidationIssue } from "./validation/zod";
 
 export type ApiErrorCode = `API_${string}`;
 
@@ -28,7 +29,9 @@ export interface ApiProblemDetails {
   retryable: boolean;
   fatal: boolean;
   instance?: string;
+  request_id?: string;
   context?: ApiErrorContext;
+  issues?: ApiValidationIssue[];
   cause?: ApiProblemDetails;
 }
 
@@ -41,6 +44,7 @@ export interface ApiErrorOptions {
   retryable?: boolean;
   fatal?: boolean;
   context?: ApiErrorContext;
+  issues?: ApiValidationIssue[];
   cause?: unknown;
   type?: string;
 }
@@ -54,6 +58,7 @@ export interface ApiErrorFallback {
   retryable?: boolean;
   fatal?: boolean;
   context?: ApiErrorContext;
+  issues?: ApiValidationIssue[];
 }
 
 function normalizeType(code: ApiErrorCode): string {
@@ -97,6 +102,7 @@ export class ApiError extends Error {
   readonly retryable: boolean;
   readonly fatal: boolean;
   readonly context?: ApiErrorContext;
+  readonly issues?: ApiValidationIssue[];
 
   constructor(options: ApiErrorOptions) {
     super(options.detail, { cause: buildCause(options.cause) });
@@ -110,10 +116,16 @@ export class ApiError extends Error {
     this.retryable = options.retryable ?? false;
     this.fatal = options.fatal ?? false;
     this.context = options.context;
+    this.issues = options.issues;
   }
 
-  toProblem(instance?: string): ApiProblemDetails {
-    const cause = this.cause ? asApiError(this.cause).toProblem() : undefined;
+  toProblem(instance?: string, requestId?: string): ApiProblemDetails {
+    const cause =
+      this.issues && this.issues.length > 0
+        ? undefined
+        : this.cause
+          ? asApiError(this.cause).toProblem()
+          : undefined;
 
     return {
       type: this.type,
@@ -125,7 +137,9 @@ export class ApiError extends Error {
       retryable: this.retryable,
       fatal: this.fatal,
       ...(instance ? { instance } : {}),
+      ...(requestId ? { request_id: requestId } : {}),
       ...(this.context ? { context: this.context } : {}),
+      ...(this.issues ? { issues: this.issues } : {}),
       ...(cause ? { cause } : {}),
     };
   }
@@ -167,14 +181,13 @@ export function asApiError(error: unknown, fallback: ApiErrorFallback = {}): Api
     return apiError({
       code: fallback.code ?? "API_VALIDATION_FAILED",
       title: fallback.title ?? "Validation failed",
-      detail:
-        fallback.detail ??
-        error.issues.map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`).join("; "),
+      detail: fallback.detail ?? summarizeZodError(error),
       status: fallback.status ?? 400,
       category: fallback.category ?? "validation",
       retryable: fallback.retryable ?? false,
       fatal: fallback.fatal ?? false,
       context: fallback.context,
+      issues: fallback.issues ?? formatZodIssues(error),
       cause: getCause(error),
     });
   }
@@ -203,6 +216,7 @@ export function asApiError(error: unknown, fallback: ApiErrorFallback = {}): Api
       retryable: error.retryable,
       fatal: error.fatal,
       context: error.context,
+      issues: error.issues,
       cause: error.cause,
       type: error.type,
     });

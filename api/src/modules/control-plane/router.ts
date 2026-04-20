@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
+import { ZodError } from "zod";
 import { fail } from "../../errors";
+import { formatZodIssues, summarizeZodError } from "../../validation/zod";
 import {
   createErasureRequestSchema,
   idempotencyKeyParamSchema,
@@ -14,13 +16,19 @@ import type { ControlPlaneService } from "./service";
 function validationHook(target: "json" | "header" | "param") {
   return (result: { success: boolean; error?: unknown }) => {
     if (!result.success) {
+      const issues = result.error instanceof ZodError ? formatZodIssues(result.error) : undefined;
       fail({
         code: "API_VALIDATION_FAILED",
         title: "Validation failed",
-        detail: `Invalid ${target} payload.`,
+        detail:
+          result.error instanceof ZodError ? summarizeZodError(result.error) : `Invalid ${target} payload.`,
         status: 400,
         category: "validation",
         retryable: false,
+        context: {
+          target,
+        },
+        issues,
         cause: result.error,
       });
     }

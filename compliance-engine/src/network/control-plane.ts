@@ -5,9 +5,7 @@ import type { ApiClient, SyncTaskResponse, TaskAckPayload } from "../worker";
 
 const logger = getLogger({ component: "control-plane" });
 
-const isoDateStringSchema = z.string().refine((value) => !Number.isNaN(Date.parse(value)), {
-  message: "Expected an ISO-8601 timestamp.",
-});
+const isoDateStringSchema = z.iso.datetime();
 
 const taskPayloadBaseSchema = z
   .object({
@@ -39,7 +37,7 @@ const syncTaskSchema = z.discriminatedUnion("task_type", [
       }).superRefine((value, ctx) => {
         if (!value.subject_opaque_id && value.userId === undefined) {
           ctx.addIssue({
-            code: z.ZodIssueCode.custom,
+            code: "custom",
             message: "VAULT_USER payload must include subject_opaque_id or userId.",
             path: ["subject_opaque_id"],
           });

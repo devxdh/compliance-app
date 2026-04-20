@@ -1,4 +1,5 @@
 import { ZodError } from "zod";
+import { formatZodIssues, summarizeZodError, type WorkerValidationIssue } from "./validation/zod";
 
 export type WorkerErrorCode = `DPDP_${string}`;
 
@@ -28,6 +29,7 @@ export interface WorkerProblemDetails {
   fatal: boolean;
   instance?: string;
   context?: WorkerErrorContext;
+  issues?: WorkerValidationIssue[];
   cause?: WorkerProblemDetails;
 }
 
@@ -39,6 +41,7 @@ export interface WorkerErrorOptions {
   retryable?: boolean;
   fatal?: boolean;
   context?: WorkerErrorContext;
+  issues?: WorkerValidationIssue[];
   cause?: unknown;
   type?: string;
 }
@@ -51,6 +54,7 @@ export interface WorkerErrorFallback {
   retryable?: boolean;
   fatal?: boolean;
   context?: WorkerErrorContext;
+  issues?: WorkerValidationIssue[];
 }
 
 const RETRYABLE_POSTGRES_CODES = new Set([
@@ -177,9 +181,7 @@ function inferDetail(error: unknown, fallback?: WorkerErrorFallback): string {
   }
 
   if (error instanceof ZodError) {
-    return error.issues
-      .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
-      .join("; ");
+    return summarizeZodError(error);
   }
 
   if (error instanceof Error && error.message.trim().length > 0) {
@@ -253,6 +255,7 @@ export class WorkerError extends Error {
   readonly retryable: boolean;
   readonly fatal: boolean;
   readonly context?: WorkerErrorContext;
+  readonly issues?: WorkerValidationIssue[];
 
   constructor(options: WorkerErrorOptions) {
     super(options.detail, { cause: buildCause(options.cause) });
@@ -265,6 +268,7 @@ export class WorkerError extends Error {
     this.retryable = options.retryable ?? false;
     this.fatal = options.fatal ?? false;
     this.context = options.context;
+    this.issues = options.issues;
   }
 
   toProblem(instance?: string): WorkerProblemDetails {
@@ -280,6 +284,7 @@ export class WorkerError extends Error {
       fatal: this.fatal,
       ...(instance ? { instance } : {}),
       ...(this.context ? { context: this.context } : {}),
+      ...(this.issues ? { issues: this.issues } : {}),
       ...(cause ? { cause } : {}),
     };
   }
@@ -336,6 +341,7 @@ export function asWorkerError(error: unknown, fallback: WorkerErrorFallback = {}
       retryable: error.retryable,
       fatal: error.fatal,
       context: error.context,
+      issues: error.issues,
       cause: error.cause,
       type: error.type,
     });
@@ -349,6 +355,7 @@ export function asWorkerError(error: unknown, fallback: WorkerErrorFallback = {}
     retryable: inferRetryability(error, fallback),
     fatal: inferFatal(error, fallback),
     context: fallback.context,
+    issues: error instanceof ZodError ? (fallback.issues ?? formatZodIssues(error)) : fallback.issues,
     cause: error instanceof Error ? getErrorCause(error) : undefined,
   });
 }

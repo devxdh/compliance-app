@@ -56,6 +56,14 @@ describe("WorkerError normalization", () => {
     expect(normalized.code).toBe("DPDP_VALIDATION_FAILED");
     expect(normalized.category).toBe("validation");
     expect(normalized.detail).toContain("default_retention_years");
+    expect(normalized.toProblem("worker:test").issues).toEqual([
+      {
+        path: "default_retention_years",
+        param: "default_retention_years",
+        code: "invalid_type",
+        message: "Invalid input: expected number, received null",
+      },
+    ]);
     expect(normalized.retryable).toBe(false);
   });
 });

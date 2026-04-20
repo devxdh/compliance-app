@@ -83,6 +83,23 @@ describe("Control Plane API (Integration)", () => {
       }),
     });
     expect(extraFieldResponse.status).toBe(400);
+    expect(await extraFieldResponse.json()).toEqual(
+      expect.objectContaining({
+        title: "Validation failed",
+        code: "API_VALIDATION_FAILED",
+        category: "validation",
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            param: "<root>",
+            code: "unrecognized_keys",
+            message: expect.stringContaining("Unrecognized key"),
+          }),
+        ]),
+        request_id: expect.stringMatching(
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+        ),
+      })
+    );
 
     const emailSubjectResponse = await app.request("/api/v1/erasure-requests", {
       method: "POST",
@@ -94,6 +111,17 @@ describe("Control Plane API (Integration)", () => {
       ),
     });
     expect(emailSubjectResponse.status).toBe(400);
+    expect(await emailSubjectResponse.json()).toEqual(
+      expect.objectContaining({
+        code: "API_VALIDATION_FAILED",
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            param: "subject_opaque_id",
+            message: "must be an opaque identifier, not an email address",
+          }),
+        ]),
+      })
+    );
 
     const phoneActorResponse = await app.request("/api/v1/erasure-requests", {
       method: "POST",
@@ -105,6 +133,17 @@ describe("Control Plane API (Integration)", () => {
       ),
     });
     expect(phoneActorResponse.status).toBe(400);
+    expect(await phoneActorResponse.json()).toEqual(
+      expect.objectContaining({
+        code: "API_VALIDATION_FAILED",
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            param: "actor_opaque_id",
+            message: "must be an opaque identifier, not a phone number",
+          }),
+        ]),
+      })
+    );
 
     const missingActorResponse = await app.request("/api/v1/erasure-requests", {
       method: "POST",
@@ -118,6 +157,17 @@ describe("Control Plane API (Integration)", () => {
       }),
     });
     expect(missingActorResponse.status).toBe(400);
+    expect(await missingActorResponse.json()).toEqual(
+      expect.objectContaining({
+        code: "API_VALIDATION_FAILED",
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            param: "actor_opaque_id",
+            code: "invalid_type",
+          }),
+        ]),
+      })
+    );
   });
 
   it("applies secure response headers and normalizes untrusted request ids", async () => {

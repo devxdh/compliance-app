@@ -18,7 +18,7 @@ const rootPiiColumnsSchema = z
     const entries = Object.entries(value);
     if (entries.length === 0) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         message: "graph.root_pii_columns must contain at least one column mapping.",
       });
       return;
@@ -29,7 +29,7 @@ const rootPiiColumnsSchema = z
         assertIdentifier(column, "graph root pii column");
       } catch (error) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           message: error instanceof Error ? error.message : "Invalid graph root pii column.",
         });
       }
@@ -49,7 +49,7 @@ const satelliteTargetSchema = z
       assertIdentifier(value.table, "satellite table name");
     } catch (error) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         message: error instanceof Error ? error.message : "Invalid satellite table name.",
         path: ["table"],
       });
@@ -59,7 +59,7 @@ const satelliteTargetSchema = z
       assertIdentifier(value.lookup_column, "satellite lookup column");
     } catch (error) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         message: error instanceof Error ? error.message : "Invalid satellite lookup column.",
         path: ["lookup_column"],
       });
@@ -67,7 +67,7 @@ const satelliteTargetSchema = z
 
     if (value.action === "redact" && (!value.masking_rules || Object.keys(value.masking_rules).length === 0)) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         message: "satellite target masking_rules is required for redact actions.",
         path: ["masking_rules"],
       });
@@ -83,7 +83,7 @@ const satelliteTargetSchema = z
         assertIdentifier(column, "satellite masking rule column");
       } catch (error) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           message: error instanceof Error ? error.message : "Invalid satellite masking rule column.",
           path: ["masking_rules", column],
         });
@@ -103,7 +103,7 @@ const retentionRuleSchema = z
   .superRefine((value, ctx) => {
     if (value.if_has_data_in.length === 0) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         message: "retention rule must reference at least one evidence table.",
         path: ["if_has_data_in"],
       });
@@ -115,7 +115,7 @@ const retentionRuleSchema = z
         assertIdentifier(table, "retention rule evidence table");
       } catch (error) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           message: error instanceof Error ? error.message : "Invalid retention rule evidence table.",
           path: ["if_has_data_in"],
         });
@@ -180,7 +180,7 @@ const workerYamlSchema = z
       assertIdentifier(value.database.app_schema, "application schema name");
     } catch (error) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         message: error instanceof Error ? error.message : "Invalid application schema name.",
         path: ["database", "app_schema"],
       });
@@ -190,7 +190,7 @@ const workerYamlSchema = z
       assertIdentifier(value.database.engine_schema, "engine schema name");
     } catch (error) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         message: error instanceof Error ? error.message : "Invalid engine schema name.",
         path: ["database", "engine_schema"],
       });
@@ -200,7 +200,7 @@ const workerYamlSchema = z
       assertIdentifier(value.graph.root_table, "graph root table");
     } catch (error) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         message: error instanceof Error ? error.message : "Invalid graph root table.",
         path: ["graph", "root_table"],
       });
@@ -210,7 +210,7 @@ const workerYamlSchema = z
       assertIdentifier(value.graph.root_id_column, "graph root id column");
     } catch (error) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         message: error instanceof Error ? error.message : "Invalid graph root id column.",
         path: ["graph", "root_id_column"],
       });
@@ -221,7 +221,7 @@ const workerYamlSchema = z
         assertIdentifier(value.graph.notice_email_column, "graph notice email column");
       } catch (error) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           message: error instanceof Error ? error.message : "Invalid graph notice email column.",
           path: ["graph", "notice_email_column"],
         });
@@ -233,7 +233,7 @@ const workerYamlSchema = z
         assertIdentifier(value.graph.notice_name_column, "graph notice name column");
       } catch (error) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           message: error instanceof Error ? error.message : "Invalid graph notice name column.",
           path: ["graph", "notice_name_column"],
         });

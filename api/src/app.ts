@@ -3,11 +3,11 @@ import type { Context, Next } from "hono";
 import { secureHeaders } from "hono/secure-headers";
 import type postgres from "postgres";
 import type { CoeSigner } from "./crypto/coe";
-import { asApiError, serializeApiError } from "./errors";
+import { handleApiError, handleNotFound } from "./http/error-handler";
 import { ControlPlaneRepository } from "./modules/control-plane/repository";
 import { createControlPlaneRouter } from "./modules/control-plane/router";
 import { ControlPlaneService } from "./modules/control-plane/service";
-import { getLogger, logError } from "./observability/logger";
+import { getLogger } from "./observability/logger";
 
 /**
  * Dependencies required to construct the Control Plane HTTP app.
@@ -92,29 +92,8 @@ export function createApp(options: CreateAppOptions) {
   app.use("*", secureHeaders());
   app.use("*", requestContextMiddleware);
 
-  app.onError((error, c) => {
-    const normalized = logError(getRequestLogger(c), error, "HTTP request failed");
-    return new Response(JSON.stringify(normalized.toProblem(c.req.path)), {
-      status: normalized.status,
-      headers: {
-        "content-type": "application/json",
-      },
-    });
-  });
-
-  app.notFound((c) => {
-    const problem = serializeApiError(
-      asApiError(undefined, {
-        code: "API_ROUTE_NOT_FOUND",
-        title: "Route not found",
-        detail: `No route matches ${c.req.method} ${c.req.path}.`,
-        status: 404,
-        category: "validation",
-      }),
-      c.req.path
-    );
-    return c.json(problem, 404);
-  });
+  app.onError(handleApiError);
+  app.notFound(handleNotFound);
 
   app.get("/health", (c) => c.json({ ok: true }, 200));
   app.route("/api/v1", createControlPlaneRouter(service));

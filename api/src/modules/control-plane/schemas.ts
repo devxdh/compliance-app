@@ -62,9 +62,8 @@ export const createErasureRequestSchema = z
         const violation = getWebhookUrlViolation(value);
         if (violation) {
           ctx.addIssue({
-            code: z.ZodIssueCode.custom,
+            code: "custom",
             message: violation.detail,
-            path: ["webhook_url"],
           });
         }
       })
