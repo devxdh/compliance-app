@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getWebhookUrlViolation } from "./webhook";
 
-const isoDateTime = z.string().datetime();
+const isoDateTime = z.iso.datetime();
 const emailLikePattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 
 function looksLikePhoneNumber(value: string): boolean {
@@ -48,7 +48,7 @@ export const outboxEventTypeSchema = z.enum([
 export const createErasureRequestSchema = z
   .object({
     subject_opaque_id: opaqueIdentifierSchema,
-    idempotency_key: z.string().uuid(),
+    idempotency_key: z.uuid(),
     trigger_source: erasureTriggerSourceSchema,
     actor_opaque_id: opaqueIdentifierSchema,
     legal_framework: z.string().min(1),
@@ -57,7 +57,6 @@ export const createErasureRequestSchema = z
     cooldown_days: z.number().int().min(0).default(30),
     shadow_mode: z.boolean().default(false),
     webhook_url: z
-      .string()
       .url()
       .superRefine((value, ctx) => {
         const violation = getWebhookUrlViolation(value);
@@ -113,13 +112,13 @@ export const workerHeaderSchema = z
 
 export const requestIdParamSchema = z
   .object({
-    requestId: z.string().uuid(),
+    requestId: z.uuid(),
   })
   .strict();
 
 export const idempotencyKeyParamSchema = z
   .object({
-    idempotency_key: z.string().uuid(),
+    idempotency_key: z.uuid(),
   })
   .strict();
 
