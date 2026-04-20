@@ -88,7 +88,7 @@ export const workerAckSchema = z
 export const workerOutboxEventSchema = z
   .object({
     idempotency_key: z.string().min(1),
-    request_id: z.string().uuid(),
+    request_id: z.uuid(),
     subject_opaque_id: z.string().min(1),
     event_type: outboxEventTypeSchema,
     payload: z.record(z.string(), z.unknown()),

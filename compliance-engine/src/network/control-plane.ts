@@ -11,9 +11,9 @@ const isoDateStringSchema = z.string().refine((value) => !Number.isNaN(Date.pars
 
 const taskPayloadBaseSchema = z
   .object({
-    request_id: z.string().uuid().optional(),
+    request_id: z.uuid().optional(),
     subject_opaque_id: z.string().min(1).optional(),
-    idempotency_key: z.string().uuid().optional(),
+    idempotency_key: z.uuid().optional(),
     trigger_source: z
       .enum(["USER_CONSENT_WITHDRAWAL", "PURPOSE_FULFILLED", "ADMIN_PURGE"])
       .optional(),
@@ -23,7 +23,7 @@ const taskPayloadBaseSchema = z
     tenant_id: z.string().min(1).optional(),
     cooldown_days: z.number().int().min(0).optional(),
     shadow_mode: z.boolean().optional(),
-    webhook_url: z.string().url().optional(),
+    webhook_url: z.url().optional(),
     userId: z.number().int().positive().optional(),
     now: isoDateStringSchema.optional(),
   })

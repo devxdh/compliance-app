@@ -321,11 +321,11 @@ function normalizeWorkerYaml(config: WorkerYamlConfig): WorkerYamlConfig {
       lookup_column: assertIdentifier(target.lookup_column, "satellite lookup column"),
       masking_rules: target.masking_rules
         ? Object.fromEntries(
-            Object.entries(target.masking_rules).map(([column, rule]) => [
-              assertIdentifier(column, "satellite masking rule column"),
-              rule,
-            ])
-          )
+          Object.entries(target.masking_rules).map(([column, rule]) => [
+            assertIdentifier(column, "satellite masking rule column"),
+            rule,
+          ])
+        )
         : undefined,
     })),
     compliance_policy: {
