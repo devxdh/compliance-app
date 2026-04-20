@@ -1,0 +1,14 @@
+.git
+.github
+.vscode
+.idea
+node_modules
+**/node_modules
+sessions
+coverage
+dist
+tmp
+.DS_Store
+*.log
+deploy/local/runtime
+deploy/local/generated

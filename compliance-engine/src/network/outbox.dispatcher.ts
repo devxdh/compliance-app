@@ -4,6 +4,7 @@ import type {
   FetchDispatcherOptions,
   OutboxEvent,
 } from "./outbox.shared";
+import { computeRequestSignature } from "./request-signing";
 
 interface ControlPlaneOutboxPayload {
   request_id?: string | null;
@@ -78,14 +79,35 @@ export function createFetchDispatcher(options: FetchDispatcherOptions) {
     const body = buildControlPlaneRequestBody(event);
 
     try {
+      const bodyText = JSON.stringify(body);
+      const requestSigningSecret = (options as FetchDispatcherOptions & { requestSigningSecret?: string }).requestSigningSecret;
+      const signingHeaders =
+        requestSigningSecret && options.clientId
+          ? (() => {
+            const timestamp = String(Date.now());
+            return computeRequestSignature(
+              requestSigningSecret,
+              "POST",
+              new URL(options.url).pathname,
+              options.clientId,
+              timestamp,
+              bodyText
+            ).then((signature) => ({
+              "x-dpdp-timestamp": timestamp,
+              "x-dpdp-signature": signature,
+            }));
+          })()
+          : Promise.resolve({});
+      const signedHeaders = await signingHeaders;
       const response = await fetch(options.url, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           ...(options.clientId ? { "x-client-id": options.clientId } : {}),
           ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
+          ...signedHeaders,
         },
-        body: JSON.stringify(body),
+        body: bodyText,
         signal: controller.signal,
         redirect: "error",
       });

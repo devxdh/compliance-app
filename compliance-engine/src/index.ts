@@ -1,6 +1,10 @@
 import postgres from "postgres";
+import { assertConfigSchemaCompatibility } from "./bootstrap/config-compatibility";
+import { readRuntimeSecret } from "./config/secrets";
+import { verifySignedWorkerConfig } from "./config/signature";
 import { assertSchemaIntegrity } from "./bootstrap/integrity";
 import { readWorkerConfig } from "./config/worker";
+import { runMigrations } from "./db/migrations";
 import { workerError } from "./errors";
 import type { MockMailer } from "./engine/notifier";
 import { createFetchDispatcher } from "./network/outbox";
@@ -11,6 +15,7 @@ import { ComplianceWorker } from "./worker";
 
 const logger = getLogger({ component: "bootstrap" });
 let deadLettersTotal = 0;
+let workerBooted = false;
 
 async function readOutboxQueueDepth(sql: postgres.Sql, engineSchema: string): Promise<number> {
   const [row] = await sql<{ total: number }[]>`
@@ -34,15 +39,73 @@ function createMetricsPayload(queueDepth: number): string {
   ].join("\n");
 }
 
+async function checkDatabaseHealth(sql: postgres.Sql): Promise<boolean> {
+  try {
+    await sql`SELECT 1`;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function sendMailerWebhook(
+  url: string,
+  message: Parameters<MockMailer["sendEmail"]>[0],
+  timeoutMs: number
+): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(message),
+      signal: controller.signal,
+      redirect: "error",
+    });
+
+    if (!response.ok) {
+      throw workerError({
+        code: "DPDP_MAILER_TRANSPORT_FAILED",
+        title: "Mailer transport failed",
+        detail: `MAILER_WEBHOOK_URL responded with HTTP ${response.status}.`,
+        category: "network",
+        retryable: response.status >= 500 || response.status === 429,
+        fatal: response.status >= 400 && response.status < 500 && response.status !== 429,
+      });
+    }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw workerError({
+        code: "DPDP_MAILER_TRANSPORT_TIMEOUT",
+        title: "Mailer transport timed out",
+        detail: `MAILER_WEBHOOK_URL did not respond within ${timeoutMs}ms.`,
+        category: "network",
+        retryable: true,
+        fatal: false,
+      });
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function main() {
   registerProcessGuards(logger);
   logger.info("Starting DPDP Compliance Worker");
 
-  const config = readWorkerConfig();
+  const configPath = new URL("../compliance.worker.yml", import.meta.url);
+  await verifySignedWorkerConfig(process.env, configPath);
+  const config = readWorkerConfig(process.env, configPath);
 
   let sql: postgres.Sql | undefined;
   let sqlReplica: postgres.Sql | undefined;
@@ -62,10 +125,14 @@ async function main() {
         })
       : undefined;
 
+    await runMigrations(sql, config.database.engine_schema);
     await assertSchemaIntegrity(sql, config.database.app_schema, config.integrity.expected_schema_hash);
+    await assertConfigSchemaCompatibility(sql, config);
 
     const workerClientId = process.env.API_CLIENT_ID ?? "worker-1";
-    const workerBearerToken = process.env.API_WORKER_TOKEN ?? "worker-secret";
+    const workerBearerToken =
+      readRuntimeSecret(process.env, "API_WORKER_TOKEN") || "worker-secret";
+    const requestSigningSecret = readRuntimeSecret(process.env, "API_REQUEST_SIGNING_SECRET") || undefined;
     const workerAuthHeaders = {
       "x-client-id": workerClientId,
       authorization: `Bearer ${workerBearerToken}`,
@@ -75,6 +142,7 @@ async function main() {
       url: process.env.API_OUTBOX_URL ?? "http://localhost:3000/api/v1/worker/outbox",
       token: workerBearerToken,
       clientId: workerClientId,
+      requestSigningSecret,
       timeoutMs: 10_000,
     });
 
@@ -90,27 +158,10 @@ async function main() {
       });
     }
 
+    const mailerTimeoutMs = Number(process.env.MAILER_TIMEOUT_MS ?? "10000");
     const mailer: MockMailer = {
       async sendEmail(message) {
-        const response = await fetch(mailerWebhookUrl, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-          },
-          body: JSON.stringify(message),
-          redirect: "error",
-        });
-
-        if (!response.ok) {
-          throw workerError({
-            code: "DPDP_MAILER_TRANSPORT_FAILED",
-            title: "Mailer transport failed",
-            detail: `MAILER_WEBHOOK_URL responded with HTTP ${response.status}.`,
-            category: "network",
-            retryable: response.status >= 500 || response.status === 429,
-            fatal: response.status >= 400 && response.status < 500 && response.status !== 429,
-          });
-        }
+        await sendMailerWebhook(mailerWebhookUrl, message, mailerTimeoutMs);
       },
     };
 
@@ -119,6 +170,7 @@ async function main() {
       ackBaseUrl: process.env.API_BASE_URL ?? "http://localhost:3000/api/v1/worker/tasks",
       workerAuthHeaders,
       pushOutboxEvent,
+      requestSigningSecret,
       timeoutMs: 10_000,
     });
 
@@ -136,26 +188,39 @@ async function main() {
       port: metricsPort,
       fetch: async (request) => {
         const url = new URL(request.url);
-        if (url.pathname !== "/metrics") {
-          return new Response("Not Found", { status: 404 });
+        if (url.pathname === "/healthz") {
+          return new Response("ok", { status: 200 });
         }
 
-        const queueDepth = await readOutboxQueueDepth(sql!, config.database.engine_schema);
-        return new Response(createMetricsPayload(queueDepth), {
-          status: 200,
-          headers: {
-            "content-type": "text/plain; version=0.0.4; charset=utf-8",
-          },
-        });
+        if (url.pathname === "/readyz") {
+          const ready = workerBooted && (await checkDatabaseHealth(sql!));
+          return new Response(ready ? "ready" : "not ready", {
+            status: ready ? 200 : 503,
+          });
+        }
+
+        if (url.pathname === "/metrics") {
+          const queueDepth = await readOutboxQueueDepth(sql!, config.database.engine_schema);
+          return new Response(createMetricsPayload(queueDepth), {
+            status: 200,
+            headers: {
+              "content-type": "text/plain; version=0.0.4; charset=utf-8",
+            },
+          });
+        }
+
+        return new Response("Not Found", { status: 404 });
       },
     });
 
+    workerBooted = true;
     logger.info(
       {
         appSchema: config.database.app_schema,
         engineSchema: config.database.engine_schema,
         replicaEnabled: Boolean(sqlReplica),
         metricsPort,
+        mailerTimeoutMs,
       },
       "DPDP Compliance Worker booted"
     );

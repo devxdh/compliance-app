@@ -22,8 +22,18 @@
     "engine:test": "bun run --cwd ./compliance-engine test",
     "engine:test-ui": "bun run --cwd ./compliance-engine test:ui",
     "engine:typecheck": "bun run --cwd ./compliance-engine typecheck",
+    "local:generate-coe-keys": "bun run scripts/generate-coe-keypair.ts",
+    "local:render-worker-config": "bun run scripts/render-local-worker-config.ts",
+    "local:sign-worker-config": "bun run scripts/sign-worker-config.ts",
+    "local:e2e": "bun run scripts/local-e2e.ts",
     "test": "bun run engine:test",
     "typecheck": "bun run api:typecheck && bun run engine:typecheck",
     "check": "bun run typecheck && bun run test"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0"
+  },
+  "dependencies": {
+    "postgres": "^3.4.9"
   }
 }

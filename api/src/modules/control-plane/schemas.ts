@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getWebhookUrlViolation } from "./webhook";
 
-const isoDateTime = z.iso.datetime();
+const isoDateTime = z.iso.datetime({ offset: true });
 const emailLikePattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 
 function looksLikePhoneNumber(value: string): boolean {

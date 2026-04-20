@@ -21,6 +21,7 @@ import {
 import { finalizeTerminalOutboxEvent, isTerminalEventType } from "./service.terminal";
 import type { ServiceOptions } from "./service.types";
 import { assertSafeWebhookUrl } from "./webhook";
+import { recordUsageEvent, recordWorkerOutboxEvent } from "../../observability/metrics";
 
 /**
  * Domain service for zero-PII control-plane orchestration.
@@ -136,6 +137,16 @@ export class ControlPlaneService {
       this.workerClientName,
       tokenHash
     );
+    if (!client.is_active) {
+      fail({
+        code: "API_WORKER_CLIENT_INACTIVE",
+        title: "Configured worker client is inactive",
+        detail: `Worker client ${this.workerClientName} is disabled and cannot accept new erasure jobs.`,
+        status: 409,
+        category: "configuration",
+        retryable: false,
+      });
+    }
 
     const created = await this.repository.createJobAndQueueTask({
       jobId,
@@ -178,12 +189,17 @@ export class ControlPlaneService {
     bearerToken: string
   ): Promise<string | null> {
     const client = await this.repository.getClientByName(clientName);
-    if (!client) {
+    if (!client || !client.is_active) {
       return null;
     }
 
     const tokenHash = await computeTokenHash(bearerToken);
-    return tokenHash === client.worker_api_key_hash ? client.id : null;
+    if (tokenHash !== client.worker_api_key_hash) {
+      return null;
+    }
+
+    await this.repository.touchClientAuthentication(client.id, this.now());
+    return client.id;
   }
 
   /**
@@ -346,6 +362,19 @@ export class ControlPlaneService {
     if (existingEvent) {
       if (isReplayEquivalent(existingEvent, input, clientId)) {
         await this.applyOutboxLifecycle(job, input, now);
+        const usageInserted = await this.repository.insertUsageEvent({
+          billingKey: `outbox:${input.idempotency_key}`,
+          clientId,
+          erasureJobId: job.id,
+          eventType: input.event_type,
+          units: 1,
+          metadata: {
+            replay: true,
+          },
+          occurredAt: now,
+        });
+        recordWorkerOutboxEvent(input.event_type, "replay");
+        recordUsageEvent(input.event_type, usageInserted ? "inserted" : "replay");
         return { accepted: true as const, idempotent_replay: true as const };
       }
 
@@ -419,6 +448,19 @@ export class ControlPlaneService {
       );
       if (racedEvent && isReplayEquivalent(racedEvent, input, clientId)) {
         await this.applyOutboxLifecycle(job, input, now);
+        const usageInserted = await this.repository.insertUsageEvent({
+          billingKey: `outbox:${input.idempotency_key}`,
+          clientId,
+          erasureJobId: job.id,
+          eventType: input.event_type,
+          units: 1,
+          metadata: {
+            replay: true,
+          },
+          occurredAt: now,
+        });
+        recordWorkerOutboxEvent(input.event_type, "replay");
+        recordUsageEvent(input.event_type, usageInserted ? "inserted" : "replay");
         return { accepted: true as const, idempotent_replay: true as const };
       }
 
@@ -433,6 +475,19 @@ export class ControlPlaneService {
     }
 
     await this.applyOutboxLifecycle(job, input, now);
+    const usageInserted = await this.repository.insertUsageEvent({
+      billingKey: `outbox:${input.idempotency_key}`,
+      clientId,
+      erasureJobId: job.id,
+      eventType: input.event_type,
+      units: 1,
+      metadata: {
+        current_hash: input.current_hash,
+      },
+      occurredAt: now,
+    });
+    recordWorkerOutboxEvent(input.event_type, "accepted");
+    recordUsageEvent(input.event_type, usageInserted ? "inserted" : "replay");
 
     return { accepted: true as const, idempotent_replay: false as const };
   }

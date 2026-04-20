@@ -1,3 +1,4 @@
+import { promises as dns } from "node:dns";
 import { fail, type ApiErrorCode } from "../../errors";
 
 /**
@@ -75,6 +76,10 @@ function isPrivateOrSpecialIpv6(hostname: string): boolean {
   return isPrivateOrSpecialIpv4(mappedIpv4Candidate);
 }
 
+function isUnsafeResolvedAddress(address: string): boolean {
+  return isPrivateOrSpecialIpv4(address) || isPrivateOrSpecialIpv6(address);
+}
+
 /**
  * Returns a deterministic validation failure when a client-supplied webhook target violates
  * Control Plane egress rules.
@@ -149,4 +154,46 @@ export function assertSafeWebhookUrl(rawValue: string): URL {
   }
 
   return new URL(rawValue);
+}
+
+/**
+ * Resolves a webhook hostname at dispatch time and rejects DNS answers that target private or special-use ranges.
+ *
+ * This closes the gap where a client-supplied public hostname later rebinds to an internal address after the
+ * ingestion-time URL validation has already succeeded.
+ *
+ * @param rawValue - Stored webhook URL.
+ * @returns Parsed URL ready for outbound dispatch.
+ * @throws {ApiError} When DNS resolution yields unsafe addresses.
+ */
+export async function assertSafeWebhookDispatchTarget(rawValue: string): Promise<URL> {
+  const url = assertSafeWebhookUrl(rawValue);
+  const hostname = url.hostname.toLowerCase();
+
+  if (parseIpv4(hostname) || isIpv6Literal(hostname)) {
+    return url;
+  }
+
+  const [ipv4Results, ipv6Results] = await Promise.allSettled([
+    dns.resolve4(hostname),
+    dns.resolve6(hostname),
+  ]);
+
+  const resolvedAddresses = [
+    ...(ipv4Results.status === "fulfilled" ? ipv4Results.value : []),
+    ...(ipv6Results.status === "fulfilled" ? ipv6Results.value : []),
+  ];
+
+  if (resolvedAddresses.some(isUnsafeResolvedAddress)) {
+    fail({
+      code: "API_WEBHOOK_URL_HOST_FORBIDDEN",
+      title: "Invalid webhook URL",
+      detail: "webhook_url resolved to a loopback, private, link-local, or special-use network range.",
+      status: 502,
+      category: "external",
+      retryable: false,
+    });
+  }
+
+  return url;
 }

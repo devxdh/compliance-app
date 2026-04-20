@@ -7,7 +7,7 @@ import type {
   TerminalCertificateMethod,
   TerminalEventType,
 } from "./service.types";
-import { assertSafeWebhookUrl } from "./webhook";
+import { assertSafeWebhookDispatchTarget } from "./webhook";
 
 /**
  * Returns the Certificate of Erasure method code bound into the signed payload.
@@ -77,7 +77,7 @@ async function dispatchTerminalWebhook(
     };
   }
 ): Promise<void> {
-  const safeWebhookUrl = assertSafeWebhookUrl(webhookUrl);
+  const safeWebhookUrl = await assertSafeWebhookDispatchTarget(webhookUrl);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), webhookTimeoutMs);
 

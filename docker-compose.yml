@@ -1,0 +1,162 @@
+services:
+  postgres:
+    image: postgres:17.7-alpine
+    environment:
+      POSTGRES_DB: dpdp_local
+      POSTGRES_USER: dpdp
+      POSTGRES_PASSWORD: dpdp
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dpdp -d dpdp_local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    ports:
+      - "55432:5432"
+    volumes:
+      - dpdp-postgres-data:/var/lib/postgresql/data
+      - ./deploy/local/postgres-init:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
+
+  mock-gateway:
+    build:
+      context: .
+      dockerfile: deploy/local/mock-gateway.Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "18080:8080"
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:8080/healthz'); if (!r.ok) process.exit(1);"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://dpdp:dpdp@postgres:5432/dpdp_local
+      API_CONTROL_SCHEMA: dpdp_control
+      PORT: 3000
+      WORKER_CLIENT_NAME: worker-1
+      WORKER_SHARED_SECRET: worker-secret
+      WORKER_REQUEST_SIGNING_SECRET: request-signing-secret
+      ADMIN_API_TOKEN: admin-secret
+      PUBLIC_RATE_LIMIT_WINDOW_MS: 60000
+      PUBLIC_RATE_LIMIT_MAX_REQUESTS: 120
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ports:
+      - "13000:3000"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/bun", "-e", "const r = await fetch('http://127.0.0.1:3000/ready'); if (!r.ok) process.exit(1);"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: compliance-engine/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      mock-gateway:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://dpdp:dpdp@postgres:5432/dpdp_local
+      API_BASE_URL: http://api:3000/api/v1/worker/tasks
+      API_SYNC_URL: http://api:3000/api/v1/worker/sync
+      API_OUTBOX_URL: http://api:3000/api/v1/worker/outbox
+      API_CLIENT_ID: worker-1
+      API_WORKER_TOKEN: worker-secret
+      API_REQUEST_SIGNING_SECRET: request-signing-secret
+      MAILER_WEBHOOK_URL: http://mock-gateway:8080/mail
+      METRICS_PORT: 9464
+      DPDP_MASTER_KEY: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      DPDP_HMAC_KEY: 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - ./deploy/local/generated/compliance.worker.yml:/app/compliance-engine/compliance.worker.yml:ro
+    ports:
+      - "19464:9464"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/bun", "-e", "const r = await fetch('http://127.0.0.1:9464/readyz'); if (!r.ok) process.exit(1);"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.11.2
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "19090:9090"
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.32.0
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+    volumes:
+      - ./deploy/prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "19093:9093"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.0.1
+    depends_on:
+      prometheus:
+        condition: service_started
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "13010:3000"
+    restart: unless-stopped
+
+volumes:
+  dpdp-postgres-data:
+  prometheus-data:
+  grafana-data:

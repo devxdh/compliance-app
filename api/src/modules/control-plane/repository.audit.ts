@@ -79,3 +79,28 @@ export async function getAuditEventByIdempotencyKey(
   `;
   return row ?? null;
 }
+
+/**
+ * Streams audit ledger rows for operator export and external archival jobs.
+ *
+ * @param context - Repository SQL context.
+ * @param filters - Optional client and sequence window filters.
+ * @returns Ordered audit rows from oldest to newest.
+ */
+export async function listAuditLedgerEvents(
+  context: RepositoryContext,
+  filters: {
+    clientName?: string;
+    afterLedgerSeq?: number;
+  } = {}
+): Promise<AuditLedgerRow[]> {
+  return context.sql<AuditLedgerRow[]>`
+    SELECT al.*
+    FROM ${context.sql(context.schema)}.audit_ledger AS al
+    JOIN ${context.sql(context.schema)}.clients AS c
+      ON c.id = al.client_id
+    WHERE (${filters.clientName ?? null}::text IS NULL OR c.name = ${filters.clientName ?? null})
+      AND (${filters.afterLedgerSeq ?? null}::bigint IS NULL OR al.ledger_seq > ${filters.afterLedgerSeq ?? null})
+    ORDER BY al.ledger_seq ASC
+  `;
+}

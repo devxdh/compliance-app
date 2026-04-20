@@ -21,8 +21,22 @@ export async function migrateApiSchema(sql: postgres.Sql, controlSchema: string 
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         name TEXT NOT NULL UNIQUE,
         worker_api_key_hash TEXT NOT NULL,
+        display_name TEXT,
+        current_key_id TEXT NOT NULL DEFAULT 'bootstrap',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_authenticated_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
+    `;
+
+    await tx`
+      ALTER TABLE ${tx(safeSchema)}.clients
+      ADD COLUMN IF NOT EXISTS display_name TEXT,
+      ADD COLUMN IF NOT EXISTS current_key_id TEXT NOT NULL DEFAULT 'bootstrap',
+      ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS rotated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      ADD COLUMN IF NOT EXISTS last_authenticated_at TIMESTAMPTZ
     `;
 
     await tx`
@@ -157,6 +171,21 @@ export async function migrateApiSchema(sql: postgres.Sql, controlSchema: string 
     `;
 
     await tx`
+      CREATE TABLE IF NOT EXISTS ${tx(safeSchema)}.usage_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        billing_key TEXT NOT NULL UNIQUE,
+        client_id UUID NOT NULL REFERENCES ${tx(safeSchema)}.clients(id) ON DELETE CASCADE,
+        erasure_job_id UUID REFERENCES ${tx(safeSchema)}.erasure_jobs(id) ON DELETE SET NULL,
+        audit_ledger_id UUID REFERENCES ${tx(safeSchema)}.audit_ledger(id) ON DELETE SET NULL,
+        event_type TEXT NOT NULL,
+        units INTEGER NOT NULL,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        occurred_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    await tx`
       CREATE UNIQUE INDEX IF NOT EXISTS erasure_jobs_idempotency_key_idx
       ON ${tx(safeSchema)}.erasure_jobs (idempotency_key)
     `;
@@ -200,6 +229,21 @@ export async function migrateApiSchema(sql: postgres.Sql, controlSchema: string 
     await tx`
       CREATE INDEX IF NOT EXISTS audit_ledger_client_idx
       ON ${tx(safeSchema)}.audit_ledger (client_id, ledger_seq DESC)
+    `;
+
+    await tx`
+      CREATE INDEX IF NOT EXISTS clients_active_name_idx
+      ON ${tx(safeSchema)}.clients (is_active, name)
+    `;
+
+    await tx`
+      CREATE INDEX IF NOT EXISTS usage_events_client_occurred_idx
+      ON ${tx(safeSchema)}.usage_events (client_id, occurred_at DESC)
+    `;
+
+    await tx`
+      CREATE INDEX IF NOT EXISTS usage_events_event_type_idx
+      ON ${tx(safeSchema)}.usage_events (event_type, occurred_at DESC)
     `;
   });
 }

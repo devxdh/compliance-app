@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dpdp-worker-metrics
+  namespace: dpdp-compliance
+spec:
+  selector:
+    app.kubernetes.io/name: dpdp-worker
+  ports:
+    - name: metrics
+      port: 9464
+      targetPort: metrics
+

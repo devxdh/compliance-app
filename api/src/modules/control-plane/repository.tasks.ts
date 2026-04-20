@@ -268,3 +268,71 @@ export async function ackTask(
     return updated ?? null;
   });
 }
+
+/**
+ * Lists dead-lettered tasks for operator recovery workflows.
+ *
+ * @param context - Repository SQL context.
+ * @returns Dead-lettered tasks newest first.
+ */
+export async function listDeadLetterTasks(
+  context: RepositoryContext
+): Promise<TaskQueueRow[]> {
+  return context.sql<TaskQueueRow[]>`
+    SELECT *
+    FROM ${context.sql(context.schema)}.task_queue
+    WHERE status = 'DEAD_LETTER'
+    ORDER BY dead_lettered_at DESC NULLS LAST, updated_at DESC
+  `;
+}
+
+/**
+ * Requeues a dead-lettered task for manual operator recovery.
+ *
+ * @param context - Repository SQL context.
+ * @param taskId - Dead-letter task UUID.
+ * @param now - Requeue timestamp.
+ * @returns Updated task row or `null`.
+ */
+export async function requeueDeadLetterTask(
+  context: RepositoryContext,
+  taskId: string,
+  now: Date
+): Promise<TaskQueueRow | null> {
+  return context.sql.begin(async (tx) => {
+    const [task] = await tx<TaskQueueRow[]>`
+      SELECT *
+      FROM ${tx(context.schema)}.task_queue
+      WHERE id = ${taskId}
+      FOR UPDATE
+    `;
+
+    if (!task || task.status !== "DEAD_LETTER") {
+      return null;
+    }
+
+    await tx`
+      UPDATE ${tx(context.schema)}.erasure_jobs
+      SET status = CASE WHEN status = 'FAILED' THEN 'EXECUTING' ELSE status END,
+          updated_at = ${now}
+      WHERE id = ${task.erasure_job_id}
+    `;
+
+    const [updated] = await tx<TaskQueueRow[]>`
+      UPDATE ${tx(context.schema)}.task_queue
+      SET status = 'QUEUED',
+          worker_client_name = NULL,
+          leased_at = NULL,
+          lease_expires_at = NULL,
+          completed_at = NULL,
+          next_attempt_at = ${now},
+          dead_lettered_at = NULL,
+          error_text = NULL,
+          updated_at = ${now}
+      WHERE id = ${taskId}
+      RETURNING *
+    `;
+
+    return updated ?? null;
+  });
+}

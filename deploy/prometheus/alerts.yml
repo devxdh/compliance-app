@@ -1,0 +1,48 @@
+groups:
+  - name: dpdp-compliance
+    rules:
+      - alert: DpdpApiHigh5xxRate
+        expr: |
+          (
+            sum(rate(dpdp_api_http_requests_total{status=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(dpdp_api_http_requests_total[5m])), 1)
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Control Plane 5xx ratio exceeds 5%
+          description: The Control Plane has sustained elevated 5xx responses for at least 10 minutes.
+
+      - alert: DpdpApiHighLatencyP95
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(dpdp_api_http_request_duration_seconds_bucket[10m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Control Plane p95 latency exceeds 1 second
+          description: Investigate database saturation, lock contention, or downstream webhook slowness.
+
+      - alert: DpdpWorkerOutboxBacklog
+        expr: dpdp_outbox_queue_depth > 25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker outbox backlog is growing
+          description: Transactional outbox queue depth has remained above 25 for 10 minutes.
+
+      - alert: DpdpWorkerDeadLetterIncrease
+        expr: increase(dpdp_dead_letters_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Worker dead letters detected
+          description: One or more outbox events were moved into dead_letter during the last 10 minutes.
+

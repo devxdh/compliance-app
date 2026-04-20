@@ -1,0 +1,22 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dpdp-api
+  namespace: dpdp-compliance
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dpdp-api
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dpdp-worker
+  namespace: dpdp-compliance
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dpdp-worker
+

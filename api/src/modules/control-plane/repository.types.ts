@@ -12,7 +12,12 @@ import type {
 export interface ClientRow {
   id: string;
   name: string;
+  display_name: string | null;
   worker_api_key_hash: string;
+  current_key_id: string;
+  is_active: boolean;
+  rotated_at: Date;
+  last_authenticated_at: Date | null;
   created_at: Date;
 }
 
@@ -96,6 +101,32 @@ export interface AuditLedgerRow {
 }
 
 /**
+ * Immutable usage/billing record derived from billable Control Plane events.
+ */
+export interface UsageEventRow {
+  id: string;
+  billing_key: string;
+  client_id: string;
+  erasure_job_id: string | null;
+  audit_ledger_id: string | null;
+  event_type: string;
+  units: number;
+  metadata: Record<string, unknown>;
+  occurred_at: Date;
+  created_at: Date;
+}
+
+/**
+ * Aggregated usage summary grouped by client and billable event type.
+ */
+export interface UsageSummaryRow {
+  client_name: string;
+  event_type: string;
+  total_units: number;
+  event_count: number;
+}
+
+/**
  * Shared repository dependencies passed into feature-specific persistence helpers.
  */
 export interface RepositoryContext {
@@ -104,6 +135,27 @@ export interface RepositoryContext {
   taskLeaseSeconds: number;
   taskMaxAttempts: number;
   taskBaseBackoffMs: number;
+}
+
+/**
+ * Input required to create a new worker client and issue its initial raw token.
+ */
+export interface CreateClientInput {
+  name: string;
+  displayName?: string | null;
+  workerApiKeyHash: string;
+  currentKeyId: string;
+  now: Date;
+}
+
+/**
+ * Input required to rotate an existing worker client token.
+ */
+export interface RotateClientKeyInput {
+  name: string;
+  workerApiKeyHash: string;
+  currentKeyId: string;
+  now: Date;
 }
 
 /**
@@ -168,6 +220,20 @@ export interface InsertCertificateInput {
   publicKeySpkiBase64: string;
   keyId: string;
   algorithm: string;
+}
+
+/**
+ * Input required to append a billable usage event.
+ */
+export interface InsertUsageEventInput {
+  billingKey: string;
+  clientId: string;
+  erasureJobId?: string | null;
+  auditLedgerId?: string | null;
+  eventType: string;
+  units: number;
+  metadata: Record<string, unknown>;
+  occurredAt: Date;
 }
 
 /**

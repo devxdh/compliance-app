@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dpdp-api
+  namespace: dpdp-compliance
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dpdp-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dpdp-api
+    spec:
+      serviceAccountName: dpdp-api
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: ghcr.io/your-org/dpdp-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: PORT
+              value: "3000"
+            - name: API_CONTROL_SCHEMA
+              value: "dpdp_control"
+            - name: DATABASE_URL_FILE
+              value: /mnt/secrets-store/db-url
+            - name: WORKER_SHARED_SECRET_FILE
+              value: /mnt/secrets-store/worker-shared-secret
+            - name: WORKER_REQUEST_SIGNING_SECRET_FILE
+              value: /mnt/secrets-store/worker-request-signing-secret
+            - name: ADMIN_API_TOKEN_FILE
+              value: /mnt/secrets-store/admin-api-token
+            - name: COE_PRIVATE_KEY_PKCS8_BASE64_FILE
+              value: /mnt/secrets-store/coe-private-key
+            - name: COE_PUBLIC_KEY_SPKI_BASE64_FILE
+              value: /mnt/secrets-store/coe-public-key
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: dpdp-api-secrets

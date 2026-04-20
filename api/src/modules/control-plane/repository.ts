@@ -3,12 +3,21 @@ import {
   getAuditEventByIdempotencyKey,
   getLatestAuditHash,
   insertAuditLedgerEvent,
+  listAuditLedgerEvents,
 } from "./repository.audit";
 import {
   getCertificateByRequestId,
   insertCertificate,
 } from "./repository.certificates";
-import { ensureClient, getClientByName } from "./repository.clients";
+import {
+  createClient,
+  ensureClient,
+  getClientByName,
+  listClients,
+  rotateClientKey,
+  setClientActiveState,
+  touchClientAuthentication,
+} from "./repository.clients";
 import {
   cancelWaitingJobByIdempotencyKey,
   createJobAndQueueTask,
@@ -16,19 +25,35 @@ import {
   getJobByIdempotencyKey,
   transitionJobFromOutbox,
 } from "./repository.jobs";
-import { ackTask, claimNextTask, getTaskByJobId } from "./repository.tasks";
+import {
+  ackTask,
+  claimNextTask,
+  getTaskByJobId,
+  listDeadLetterTasks,
+  requeueDeadLetterTask,
+} from "./repository.tasks";
+import {
+  insertUsageEvent,
+  listUsageEvents,
+  summarizeUsage,
+} from "./repository.usage";
 import type {
   AuditLedgerRow,
   CertificateRow,
   ClientRow,
+  CreateClientInput,
   CreateJobAndQueueTaskInput,
   CreatedJobRecord,
   ErasureJobRow,
   InsertAuditLedgerEventInput,
   InsertCertificateInput,
+  InsertUsageEventInput,
   RepositoryContext,
+  RotateClientKeyInput,
   TaskQueueRow,
   TransitionJobFromOutboxInput,
+  UsageEventRow,
+  UsageSummaryRow,
 } from "./repository.types";
 
 export type {
@@ -38,6 +63,8 @@ export type {
   CreatedJobRecord,
   ErasureJobRow,
   TaskQueueRow,
+  UsageEventRow,
+  UsageSummaryRow,
 } from "./repository.types";
 
 /**
@@ -85,6 +112,56 @@ export class ControlPlaneRepository {
    */
   async getClientByName(name: string): Promise<ClientRow | null> {
     return getClientByName(this.context, name);
+  }
+
+  /**
+   * Lists registered worker clients.
+   *
+   * @returns Persisted worker clients.
+   */
+  async listClients(): Promise<ClientRow[]> {
+    return listClients(this.context);
+  }
+
+  /**
+   * Creates a new worker client and persists its hashed token metadata.
+   *
+   * @param input - Client attributes and hashed token metadata.
+   * @returns Persisted client row.
+   */
+  async createClient(input: CreateClientInput): Promise<ClientRow> {
+    return createClient(this.context, input);
+  }
+
+  /**
+   * Rotates an existing worker client key.
+   *
+   * @param input - Rotation metadata and hashed token.
+   * @returns Updated client row or `null`.
+   */
+  async rotateClientKey(input: RotateClientKeyInput): Promise<ClientRow | null> {
+    return rotateClientKey(this.context, input);
+  }
+
+  /**
+   * Enables or disables a worker client.
+   *
+   * @param name - Worker client name.
+   * @param active - Desired active state.
+   * @returns Updated client row or `null`.
+   */
+  async setClientActiveState(name: string, active: boolean): Promise<ClientRow | null> {
+    return setClientActiveState(this.context, name, active);
+  }
+
+  /**
+   * Records the latest successful worker authentication timestamp.
+   *
+   * @param clientId - Worker client id.
+   * @param now - Authentication timestamp.
+   */
+  async touchClientAuthentication(clientId: string, now: Date): Promise<void> {
+    return touchClientAuthentication(this.context, clientId, now);
   }
 
   /**
@@ -176,6 +253,26 @@ export class ControlPlaneRepository {
   }
 
   /**
+   * Lists dead-letter tasks awaiting operator intervention.
+   *
+   * @returns Dead-letter task rows.
+   */
+  async listDeadLetterTasks(): Promise<TaskQueueRow[]> {
+    return listDeadLetterTasks(this.context);
+  }
+
+  /**
+   * Requeues a dead-letter task for retry.
+   *
+   * @param taskId - Dead-letter task UUID.
+   * @param now - Requeue timestamp.
+   * @returns Updated task row or `null`.
+   */
+  async requeueDeadLetterTask(taskId: string, now: Date): Promise<TaskQueueRow | null> {
+    return requeueDeadLetterTask(this.context, taskId, now);
+  }
+
+  /**
    * Reads the latest WORM hash pointer for a client.
    *
    * @param clientId - Worker client id.
@@ -208,6 +305,16 @@ export class ControlPlaneRepository {
   }
 
   /**
+   * Lists audit ledger events for archival/export flows.
+   *
+   * @param filters - Optional client and ledger-sequence filters.
+   * @returns Ordered audit ledger rows.
+   */
+  async listAuditLedgerEvents(filters: { clientName?: string; afterLedgerSeq?: number } = {}) {
+    return listAuditLedgerEvents(this.context, filters);
+  }
+
+  /**
    * Transitions erasure job state from worker outbox event semantics.
    *
    * @param input - Job id, event type, and timestamps.
@@ -236,5 +343,35 @@ export class ControlPlaneRepository {
     requestId: string
   ): Promise<CertificateRow | null> {
     return getCertificateByRequestId(this.context, requestId);
+  }
+
+  /**
+   * Appends a billable usage event idempotently.
+   *
+   * @param input - Usage event envelope.
+   * @returns `true` when inserted, `false` on billing-key replay.
+   */
+  async insertUsageEvent(input: InsertUsageEventInput): Promise<boolean> {
+    return insertUsageEvent(this.context, input);
+  }
+
+  /**
+   * Lists raw usage events.
+   *
+   * @param filters - Optional client/time filters.
+   * @returns Usage event rows.
+   */
+  async listUsageEvents(filters: { clientName?: string; since?: Date; until?: Date } = {}) {
+    return listUsageEvents(this.context, filters);
+  }
+
+  /**
+   * Aggregates usage totals by client and billable event type.
+   *
+   * @param filters - Optional client/time filters.
+   * @returns Usage summary rows.
+   */
+  async summarizeUsage(filters: { clientName?: string; since?: Date; until?: Date } = {}) {
+    return summarizeUsage(this.context, filters);
   }
 }

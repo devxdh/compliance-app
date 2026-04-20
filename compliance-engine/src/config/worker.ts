@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import yaml from "js-yaml";
 import { z } from "zod";
+import { readRuntimeSecret } from "./secrets";
 import { assertIdentifier } from "../db/identifiers";
 import { asWorkerError, fail } from "../errors";
 import { base64ToBytes, hexToBytes } from "../utils/encoding";
@@ -382,8 +383,13 @@ export function readWorkerConfig(
     });
   }
 
-  const masterKey = decodeKey(env[parsedConfig.security.master_key_env] ?? "", parsedConfig.security.master_key_env);
-  const hmacKeyEnvValue = env[parsedConfig.security.hmac_key_env] ?? env[parsedConfig.security.master_key_env] ?? "";
+  const masterKey = decodeKey(
+    readRuntimeSecret(env, parsedConfig.security.master_key_env),
+    parsedConfig.security.master_key_env
+  );
+  const hmacKeyEnvValue =
+    readRuntimeSecret(env, parsedConfig.security.hmac_key_env) ||
+    readRuntimeSecret(env, parsedConfig.security.master_key_env);
   const hmacKey = decodeKey(hmacKeyEnvValue, parsedConfig.security.hmac_key_env);
 
   return {

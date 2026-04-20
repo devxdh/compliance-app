@@ -2,10 +2,11 @@ import { z } from "zod";
 import { asWorkerError, workerError } from "../errors";
 import { getLogger } from "../observability/logger";
 import type { ApiClient, SyncTaskResponse, TaskAckPayload } from "../worker";
+import { computeRequestSignature } from "./request-signing";
 
 const logger = getLogger({ component: "control-plane" });
 
-const isoDateStringSchema = z.iso.datetime();
+const isoDateStringSchema = z.iso.datetime({ offset: true });
 
 const taskPayloadBaseSchema = z
   .object({
@@ -86,6 +87,7 @@ export interface ControlPlaneApiClientOptions {
     authorization: string;
   };
   pushOutboxEvent: ApiClient["pushOutboxEvent"];
+  requestSigningSecret?: string;
   timeoutMs?: number;
 }
 
@@ -166,6 +168,34 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
+async function signWorkerRequest(
+  secret: string | undefined,
+  clientId: string,
+  method: string,
+  url: string,
+  bodyText: string
+): Promise<Record<string, string>> {
+  if (!secret) {
+    return {};
+  }
+
+  const timestamp = String(Date.now());
+  const pathname = new URL(url).pathname;
+  const signature = await computeRequestSignature(
+    secret,
+    method,
+    pathname,
+    clientId,
+    timestamp,
+    bodyText
+  );
+
+  return {
+    "x-dpdp-timestamp": timestamp,
+    "x-dpdp-signature": signature,
+  };
+}
+
 /**
  * Builds a strict Control Plane client that validates response payloads before task execution.
  *
@@ -181,7 +211,16 @@ export function createControlPlaneApiClient(options: ControlPlaneApiClientOption
       const response = await fetchWithTimeout(
         options.syncUrl,
         {
-          headers: options.workerAuthHeaders,
+          headers: {
+            ...options.workerAuthHeaders,
+            ...(await signWorkerRequest(
+              options.requestSigningSecret,
+              options.workerAuthHeaders["x-client-id"],
+              "GET",
+              options.syncUrl,
+              ""
+            )),
+          },
         },
         timeoutMs
       );
@@ -215,6 +254,7 @@ export function createControlPlaneApiClient(options: ControlPlaneApiClientOption
 
     async ackTask(taskId: string, status: "completed" | "failed", result: TaskAckPayload): Promise<boolean> {
       const url = `${options.ackBaseUrl}/${taskId}/ack`;
+      const bodyText = JSON.stringify({ status, result });
       const response = await fetchWithTimeout(
         url,
         {
@@ -222,8 +262,15 @@ export function createControlPlaneApiClient(options: ControlPlaneApiClientOption
           headers: {
             "content-type": "application/json",
             ...options.workerAuthHeaders,
+            ...(await signWorkerRequest(
+              options.requestSigningSecret,
+              options.workerAuthHeaders["x-client-id"],
+              "POST",
+              url,
+              bodyText
+            )),
           },
-          body: JSON.stringify({ status, result }),
+          body: bodyText,
         },
         timeoutMs
       );

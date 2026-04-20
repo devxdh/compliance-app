@@ -35,6 +35,7 @@ export interface FetchDispatcherOptions {
   url: string;
   token?: string;
   clientId?: string;
+  requestSigningSecret?: string;
   timeoutMs?: number;
 }
 

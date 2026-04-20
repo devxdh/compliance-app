@@ -36,6 +36,7 @@ describe("Control Plane API (Integration)", () => {
       controlSchema,
       signer: await createEd25519Signer("integration-key"),
       workerSharedSecret: "worker-secret",
+      adminApiToken: "admin-secret",
       workerClientName: "worker-1",
       maxOutboxPayloadBytes: 2048,
       taskMaxAttempts: overrides.taskMaxAttempts,
