@@ -9,7 +9,7 @@ Imagine a giant corporate building. The central API is the CEO sitting at headqu
 This repository is the **data plane** of the larger compliance system.
 - The central API acts as the **control plane** (orchestrator and legal certification authority).
 - This worker runs inside the client's Virtual Private Cloud (VPC) and performs local cryptographic and database mutations against the client's PostgreSQL database.
-- The only outward-facing data path is the outbox relay (Egress-Only networking via Long-Polling).
+- The only outward-facing data path is the outbox relay (Egress-Only networking via a bounded short-poll loop against the Control Plane).
 
 ---
 
@@ -63,4 +63,4 @@ Before the guard starts locking up safes, they first take a picture of the build
 
 #### Technical Terms
 - **Schema Drift Detection**: At boot, the worker computes a deterministic `SHA-256` digest of `information_schema.columns` for the target `appSchema`. If the computed live schema digest does not strictly match the `expected_schema_hash` declared in the `compliance.worker.yml` manifest, the worker throws a fatal error and exits (`exit(1)`). This fail-fast mechanism guarantees the worker never performs destructive cryptographic operations on a mutated relational graph.
-- **Tamper-Evident Outbox**: The `dpdp_engine.outbox` functions as a cryptographically verifiable append-only ledger. Every event inserted computes a `current_hash` using `SHA-256(previous_hash + JSON(payload) + idempotency_key)`. The `previous_hash` is queried in $O(1)$ time via a descending index on `created_at`. This provides an unbroken chain of custody from the `GENESIS` event to the most recent operation, enabling robust auditability and mathematical proof of execution order.
+- **Tamper-Evident Outbox**: The `dpdp_engine.outbox` functions as a cryptographically verifiable append-only ledger. Every event inserted computes a `current_hash` using `SHA-256(previous_hash + canonical_JSON(payload))`. The `previous_hash` is queried in $O(1)$ time via a descending index on `created_at`. This provides an unbroken chain of custody from the `GENESIS` event to the most recent operation, enabling robust auditability and mathematical proof of execution order.

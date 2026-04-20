@@ -3,6 +3,7 @@ import yaml from "js-yaml";
 import { z } from "zod";
 import { assertIdentifier } from "../db/identifiers";
 import { asWorkerError, fail } from "../errors";
+import { base64ToBytes, hexToBytes } from "../utils/encoding";
 
 const KEY_LENGTH = 32;
 
@@ -263,13 +264,18 @@ function decodeKey(rawValue: string, envName: string): Uint8Array {
 
   const normalizedHex = value.startsWith("hex:") ? value.slice(4) : value;
   if (/^[0-9a-fA-F]+$/.test(normalizedHex) && normalizedHex.length === KEY_LENGTH * 2) {
-    return new Uint8Array(Buffer.from(normalizedHex, "hex"));
+    return hexToBytes(normalizedHex);
   }
 
   const normalizedBase64 = value.startsWith("base64:") ? value.slice(7) : value;
-  const decoded = Buffer.from(normalizedBase64, "base64");
+  let decoded: Uint8Array;
+  try {
+    decoded = base64ToBytes(normalizedBase64);
+  } catch {
+    decoded = new Uint8Array(0);
+  }
   if (decoded.length === KEY_LENGTH) {
-    return new Uint8Array(decoded);
+    return decoded;
   }
 
   fail({

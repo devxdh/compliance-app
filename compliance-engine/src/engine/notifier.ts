@@ -4,6 +4,7 @@ import { unwrapKey } from "../crypto/envelope";
 import { assertIdentifier } from "../db/identifiers";
 import { fail } from "../errors";
 import { getLogger, logError } from "../observability/logger";
+import { base64ToBytes } from "../utils/encoding";
 import type { DispatchNoticeOptions, DispatchNoticeResult, WorkerSecrets } from "./contracts";
 import { assertWorkerSecrets, enqueueOutboxEvent, getVaultRecordByUserId, resolveSchemas } from "./support";
 import type { VaultRecord } from "./support";
@@ -383,7 +384,7 @@ export async function dispatchPreErasureNotice(
       });
     }
 
-    encryptedPayload = new Uint8Array(Buffer.from(payload.data, "base64"));
+    encryptedPayload = base64ToBytes(payload.data);
     decryptedPiiBytes = await decryptGCMBytes(encryptedPayload, dek);
     const parsed = JSON.parse(textDecoder.decode(decryptedPiiBytes)) as Record<string, unknown>;
     const emailCandidate = parsed[noticeColumns.emailColumn];

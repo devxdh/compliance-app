@@ -3,6 +3,7 @@
  */
 
 import { encryptGCM, decryptGCM } from "./aes";
+import { base64ToBytes, bytesToBase64 } from "../utils/encoding";
 
 const KEY_SIZE = 32; // 256-bit keys
 
@@ -24,10 +25,7 @@ export function generateDEK(): Uint8Array {
  * @returns Encrypted DEK blob.
  */
 export async function wrapKey(dek: Uint8Array, kek: Uint8Array): Promise<Uint8Array> {
-  const encryptedKey = await encryptGCM(
-    Buffer.from(dek).toString("base64"),
-    kek
-  );
+  const encryptedKey = await encryptGCM(bytesToBase64(dek), kek);
   return encryptedKey;
 }
 
@@ -40,5 +38,5 @@ export async function wrapKey(dek: Uint8Array, kek: Uint8Array): Promise<Uint8Ar
  */
 export async function unwrapKey(wrappedKey: Uint8Array, kek: Uint8Array): Promise<Uint8Array> {
   const decryptedBase64 = await decryptGCM(wrappedKey, kek);
-  return new Uint8Array(Buffer.from(decryptedBase64, "base64"));
+  return base64ToBytes(decryptedBase64);
 }

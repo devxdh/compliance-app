@@ -6,6 +6,7 @@ import { generateHMAC } from "../crypto/hmac";
 import { getDependencyGraph } from "../db/graph";
 import { assertIdentifier, quoteQualifiedIdentifier } from "../db/identifiers";
 import { fail } from "../errors";
+import { bytesToBase64, bytesToHex } from "../utils/encoding";
 import type { VaultUserOptions, VaultUserResult, WorkerSecrets } from "./contracts";
 import { redactSatelliteTable } from "./satellite";
 import {
@@ -208,7 +209,7 @@ async function computeMutationValue(
 
   return generateHMAC(
     `${appSchema}:${rootTable}:${column}:${normalizedValue}`,
-    Buffer.from(hmacKey).toString("base64")
+    bytesToBase64(hmacKey)
   );
 }
 
@@ -280,7 +281,7 @@ async function mutateSatelliteTarget(
   if (target.action === "redact") {
     const newHmacValue = await generateHMAC(
       `${appSchema}:${target.table}:${target.lookup_column}:${lookupValue}`,
-      Buffer.from(hmacKey).toString("base64")
+      bytesToBase64(hmacKey)
     );
     const affectedRows = await redactSatelliteTable(
       tx,
@@ -756,7 +757,7 @@ export async function vaultUser(
           rootPiiPayload[column] = lockedRootRow[column] ?? null;
         }
 
-        const salt = Buffer.from(globalThis.crypto.getRandomValues(new Uint8Array(16))).toString("hex");
+        const salt = bytesToHex(globalThis.crypto.getRandomValues(new Uint8Array(16)));
         const pseudonymSource =
           normalizeRootRowValue(rootPiiPayload[Object.keys(rootContext.rootPiiColumns)[0] ?? ""]) ??
           JSON.stringify(rootPiiPayload);
@@ -768,7 +769,7 @@ export async function vaultUser(
         encryptedPiiBuffer = await encryptGCMBytes(plaintextPiiBuffer, dek);
         const encryptedPiiPayload = {
           v: 1,
-          data: Buffer.from(encryptedPiiBuffer).toString("base64"),
+          data: bytesToBase64(encryptedPiiBuffer),
         };
 
         await tx`

@@ -38,6 +38,7 @@ Performance index highlights:
    - Registers erasure job and enqueues worker task in one transactional path.
 2. `GET /api/v1/worker/sync`
    - Claims next available task using `FOR UPDATE SKIP LOCKED`.
+   - Called by the worker in a bounded 5-second short-poll loop rather than a held long-poll request.
 3. `POST /api/v1/worker/tasks/:taskId/ack`
    - Marks task `COMPLETED`/`FAILED` and advances job state.
 4. `POST /api/v1/worker/outbox`

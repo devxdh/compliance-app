@@ -3,6 +3,7 @@ import { generateHMAC } from "../crypto/hmac";
 import { assertIdentifier } from "../db/identifiers";
 import type { WorkerSchemas, WorkerSecrets } from "./contracts";
 import { sha256Hex } from "../utils/digest";
+import { bytesToBase64 } from "../utils/encoding";
 import { canonicalJsonStringify } from "../utils/json";
 import { fail } from "../errors";
 
@@ -221,7 +222,7 @@ export async function createUserHash(
 ): Promise<string> {
   return generateHMAC(
     `${appSchema}:${rootTable}:${tenantId ?? ""}:${rootId}`,
-    Buffer.from(hmacKey).toString("base64")
+    bytesToBase64(hmacKey)
   );
 }
 
@@ -240,7 +241,7 @@ export async function createPseudonym(
   salt: string,
   hmacKey: Uint8Array
 ): Promise<string> {
-  const digest = await generateHMAC(`${userId}:${email}`, `${salt}:${Buffer.from(hmacKey).toString("base64")}`);
+  const digest = await generateHMAC(`${userId}:${email}`, `${salt}:${bytesToBase64(hmacKey)}`);
   return `dpdp_${digest.slice(0, 24)}@dpdp.invalid`;
 }
 

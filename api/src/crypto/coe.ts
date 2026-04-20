@@ -1,4 +1,5 @@
 import { fail } from "../errors";
+import { base64ToBytes, bytesToBase64 } from "../utils/encoding";
 
 const textEncoder = new TextEncoder();
 
@@ -53,8 +54,13 @@ function encodePayload(payload: unknown): ArrayBuffer {
 }
 
 function toBase64(input: ArrayBuffer | Uint8Array): string {
-  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
-  return Buffer.from(bytes).toString("base64");
+  return bytesToBase64(input);
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  return copy.buffer as ArrayBuffer;
 }
 
 /**
@@ -89,7 +95,7 @@ export async function createEd25519Signer(
 
     privateKey = await globalThis.crypto.subtle.importKey(
       "pkcs8",
-      Buffer.from(options.privateKeyPkcs8Base64, "base64"),
+      toArrayBuffer(base64ToBytes(options.privateKeyPkcs8Base64)),
       { name: "Ed25519" },
       false,
       ["sign"]
@@ -135,7 +141,7 @@ export async function verifyEd25519Signature(
 ): Promise<boolean> {
   const publicKey = await globalThis.crypto.subtle.importKey(
     "spki",
-    Buffer.from(publicKeySpkiBase64, "base64"),
+    toArrayBuffer(base64ToBytes(publicKeySpkiBase64)),
     { name: "Ed25519" },
     false,
     ["verify"]
@@ -144,7 +150,7 @@ export async function verifyEd25519Signature(
   return globalThis.crypto.subtle.verify(
     "Ed25519",
     publicKey,
-    Buffer.from(signatureBase64, "base64"),
+    toArrayBuffer(base64ToBytes(signatureBase64)),
     encodePayload(payload)
   );
 }
