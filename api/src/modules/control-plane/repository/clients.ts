@@ -3,7 +3,7 @@ import type {
   CreateClientInput,
   RepositoryContext,
   RotateClientKeyInput,
-} from "./repository.types";
+} from "./types";
 
 /**
  * Upserts a worker client record and rotates its token hash atomically.

@@ -3,7 +3,7 @@ import type {
   RepositoryContext,
   UsageEventRow,
   UsageSummaryRow,
-} from "./repository.types";
+} from "./types";
 
 /**
  * Appends a billable usage event idempotently.

@@ -2,7 +2,7 @@ import type {
   CertificateRow,
   InsertCertificateInput,
   RepositoryContext,
-} from "./repository.types";
+} from "./types";
 
 /**
  * Inserts a signed Certificate of Erasure idempotently.

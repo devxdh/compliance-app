@@ -4,11 +4,11 @@ import {
   getLatestAuditHash,
   insertAuditLedgerEvent,
   listAuditLedgerEvents,
-} from "./repository.audit";
+} from "./audit";
 import {
   getCertificateByRequestId,
   insertCertificate,
-} from "./repository.certificates";
+} from "./certificates";
 import {
   createClient,
   ensureClient,
@@ -17,26 +17,26 @@ import {
   rotateClientKey,
   setClientActiveState,
   touchClientAuthentication,
-} from "./repository.clients";
+} from "./clients";
 import {
   cancelWaitingJobByIdempotencyKey,
   createJobAndQueueTask,
   getJobById,
   getJobByIdempotencyKey,
   transitionJobFromOutbox,
-} from "./repository.jobs";
+} from "./jobs";
 import {
   ackTask,
   claimNextTask,
   getTaskByJobId,
   listDeadLetterTasks,
   requeueDeadLetterTask,
-} from "./repository.tasks";
+} from "./tasks";
 import {
   insertUsageEvent,
   listUsageEvents,
   summarizeUsage,
-} from "./repository.usage";
+} from "./usage";
 import type {
   AuditLedgerRow,
   CertificateRow,
@@ -54,7 +54,7 @@ import type {
   TransitionJobFromOutboxInput,
   UsageEventRow,
   UsageSummaryRow,
-} from "./repository.types";
+} from "./types";
 
 export type {
   AuditLedgerRow,
@@ -65,7 +65,7 @@ export type {
   TaskQueueRow,
   UsageEventRow,
   UsageSummaryRow,
-} from "./repository.types";
+} from "./types";
 
 /**
  * Postgres.js repository for the control-plane state machine.

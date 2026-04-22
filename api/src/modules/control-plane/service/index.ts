@@ -1,15 +1,15 @@
-import { fail } from "../../errors";
+import { fail } from "../../../errors";
 import {
   canonicalJsonStringify,
   computeTokenHash,
   computeWormHash,
-} from "./hash";
-import { ControlPlaneRepository } from "./repository";
+} from "../hash";
+import { ControlPlaneRepository } from "../repository";
 import type {
   CreateErasureRequestInput,
   WorkerAckInput,
   WorkerOutboxEventInput,
-} from "./schemas";
+} from "../schemas";
 import {
   assertAllowedOutboxTransition,
   assertOutboxMetadata,
@@ -17,11 +17,11 @@ import {
   isCreateRequestEquivalent,
   isReplayEquivalent,
   parseVaultLifecycleSchedule,
-} from "./service.guards";
-import { finalizeTerminalOutboxEvent, isTerminalEventType } from "./service.terminal";
-import type { ServiceOptions } from "./service.types";
-import { assertSafeWebhookUrl } from "./webhook";
-import { recordUsageEvent, recordWorkerOutboxEvent } from "../../observability/metrics";
+} from "./guards";
+import { finalizeTerminalOutboxEvent, isTerminalEventType } from "./terminal";
+import type { ServiceOptions } from "./types";
+import { assertSafeWebhookUrl } from "../webhook";
+import { recordUsageEvent, recordWorkerOutboxEvent } from "../../../observability/metrics";
 
 /**
  * Domain service for zero-PII control-plane orchestration.

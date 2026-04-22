@@ -1,11 +1,11 @@
-import { fail } from "../../errors";
-import { canonicalJsonStringify } from "./hash";
-import type { ErasureJobRow } from "./repository";
-import type { CreateErasureRequestInput, WorkerOutboxEventInput } from "./schemas";
+import { fail } from "../../../errors";
+import { canonicalJsonStringify } from "../hash";
+import type { ErasureJobRow } from "../repository";
+import type { CreateErasureRequestInput, WorkerOutboxEventInput } from "../schemas";
 import type {
   AllowedOutboxPredecessorStatus,
   VaultLifecycleSchedule,
-} from "./service.types";
+} from "./types";
 
 const ALLOWED_OUTBOX_PREDECESSORS: Record<
   WorkerOutboxEventInput["event_type"],

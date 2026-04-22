@@ -1,13 +1,13 @@
-import type { CoeSigner } from "../../crypto/coe";
-import { ApiError, fail } from "../../errors";
-import { canonicalJsonStringify } from "./hash";
-import type { ControlPlaneRepository, ErasureJobRow } from "./repository";
+import type { CoeSigner } from "../../../crypto/coe";
+import { ApiError, fail } from "../../../errors";
+import { canonicalJsonStringify } from "../hash";
+import type { ControlPlaneRepository, ErasureJobRow } from "../repository";
 import type {
   TerminalCertificateEnvelope,
   TerminalCertificateMethod,
   TerminalEventType,
-} from "./service.types";
-import { assertSafeWebhookDispatchTarget } from "./webhook";
+} from "./types";
+import { assertSafeWebhookDispatchTarget } from "../webhook";
 
 /**
  * Returns the Certificate of Erasure method code bound into the signed payload.

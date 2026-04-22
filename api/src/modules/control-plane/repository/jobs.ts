@@ -6,7 +6,7 @@ import type {
   RepositoryContext,
   TaskQueueRow,
   TransitionJobFromOutboxInput,
-} from "./repository.types";
+} from "./types";
 
 /**
  * Fetches an erasure job by request id.
@@ -163,9 +163,9 @@ export async function cancelWaitingJobByIdempotencyKey(
           completed_at = ${now},
           lease_expires_at = NULL,
           error_text = ${JSON.stringify({
-            code: "API_TASK_CANCELLED",
-            detail: "Task cancelled because erasure request moved to CANCELLED during cooldown.",
-          })},
+      code: "API_TASK_CANCELLED",
+      detail: "Task cancelled because erasure request moved to CANCELLED during cooldown.",
+    })},
           updated_at = ${now}
       WHERE erasure_job_id = ${job.id}
         AND status IN ('QUEUED', 'DISPATCHED')

@@ -1,5 +1,5 @@
-import type { CoeSigner } from "../../crypto/coe";
-import type { ControlPlaneRepository, ErasureJobRow } from "./repository";
+import type { CoeSigner } from "../../../crypto/coe";
+import type { ControlPlaneRepository, ErasureJobRow } from "../repository";
 
 /**
  * Dependencies required to construct the zero-PII orchestration service.

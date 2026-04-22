@@ -3,11 +3,11 @@ import type {
   DeferredLifecycleTaskType,
   RepositoryContext,
   TaskQueueRow,
-} from "./repository.types";
+} from "./types";
 import {
   calculateTaskRetryDelayMs,
   shouldRetryTaskFailure,
-} from "./repository.types";
+} from "./types";
 
 /**
  * Fetches the earliest task associated with a job.

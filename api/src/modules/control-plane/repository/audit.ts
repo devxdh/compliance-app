@@ -2,7 +2,7 @@ import type {
   AuditLedgerRow,
   InsertAuditLedgerEventInput,
   RepositoryContext,
-} from "./repository.types";
+} from "./types";
 
 /**
  * Reads the latest WORM hash pointer for a client in O(1) using the sequence index.

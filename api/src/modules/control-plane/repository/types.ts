@@ -4,7 +4,7 @@ import type {
   ErasureRequestStatus,
   ErasureTriggerSource,
   OutboxEventType,
-} from "./schemas";
+} from "../schemas";
 
 /**
  * Persisted worker client authorized to sync and push outbox events.
