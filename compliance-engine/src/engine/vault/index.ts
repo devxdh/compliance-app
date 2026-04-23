@@ -1,6 +1,6 @@
 import postgres from "postgres";
-import { fail } from "../errors";
-import type { VaultUserOptions, VaultUserResult, WorkerSecrets } from "./contracts";
+import { fail } from "../../errors";
+import type { VaultUserOptions, VaultUserResult, WorkerSecrets } from "../contracts";
 import {
   assertWorkerSecrets,
   createUserHash,
@@ -8,16 +8,16 @@ import {
   resolveNoticeWindowHours,
   resolveRetentionYears,
   resolveSchemas,
-} from "./support";
-import { resolveRootContext } from "./vault.context";
-import { runVaultDryRun } from "./vault.dry-run";
-import { runVaultMutation } from "./vault.execution";
+} from "../support";
+import { resolveRootContext } from "./context";
+import { runVaultDryRun } from "./dry-run";
+import { runVaultMutation } from "./execution";
 import {
   evaluateRetention,
   type RetentionEvaluationConfig,
   type RetentionEvaluationResult,
-} from "./vault.retention";
-import { ShadowModeRollback } from "./vault.shadow";
+} from "./retention";
+import { ShadowModeRollback } from "./shadow";
 
 export {
   evaluateRetention,

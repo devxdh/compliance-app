@@ -1,7 +1,7 @@
 import type postgres from "postgres";
-import type { RetentionRule } from "../config/worker";
-import { assertIdentifier } from "../db/identifiers";
-import { resolveRetentionYears } from "./support";
+import type { RetentionRule } from "../../config/worker";
+import { assertIdentifier } from "../../db/identifiers";
+import { resolveRetentionYears } from "../support";
 
 /**
  * Inputs required to evaluate the dynamic legal retention policy.

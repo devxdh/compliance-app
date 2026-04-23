@@ -1,10 +1,10 @@
-import { fail } from "../errors";
-import type { OutboxRow } from "../engine/support";
+import { fail } from "../../errors";
+import type { OutboxRow } from "../../engine/support";
 
 /**
  * Outbox row type exposed by the relay pipeline.
  */
-export interface OutboxEvent extends OutboxRow {}
+export interface OutboxEvent extends OutboxRow { }
 
 /**
  * Runtime controls for outbox claim and retry behavior.

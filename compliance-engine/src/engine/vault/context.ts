@@ -1,9 +1,9 @@
-import type { MutationRule, RootPiiColumns, SatelliteTarget } from "../config/worker";
-import { generateHMAC } from "../crypto/hmac";
-import { assertIdentifier, quoteQualifiedIdentifier } from "../db/identifiers";
-import { fail } from "../errors";
-import { bytesToBase64 } from "../utils/encoding";
-import type { DryRunPlan, VaultUserOptions } from "./contracts";
+import type { MutationRule, RootPiiColumns, SatelliteTarget } from "../../config/worker";
+import { generateHMAC } from "../../crypto/hmac";
+import { assertIdentifier, quoteQualifiedIdentifier } from "../../db/identifiers";
+import { fail } from "../../errors";
+import { bytesToBase64 } from "../../utils/encoding";
+import type { DryRunPlan, VaultUserOptions } from "../contracts";
 
 /**
  * Root-table mutation configuration resolved from worker runtime options.
@@ -61,29 +61,29 @@ export function buildVaultDryRunPlan(
       dependencyCount === 0
         ? ["No vaulting cryptography required because the root table has no dependent tables."]
         : [
-            "Generate a one-time 32-byte DEK for the root entity.",
-            "Encrypt the configured root PII payload with AES-256-GCM.",
-            "Wrap the DEK with the worker KEK using envelope encryption.",
-            "Mutate configured root PII columns with rule-driven masking/HMAC/nullification.",
-          ],
+          "Generate a one-time 32-byte DEK for the root entity.",
+          "Encrypt the configured root PII payload with AES-256-GCM.",
+          "Wrap the DEK with the worker KEK using envelope encryption.",
+          "Mutate configured root PII columns with rule-driven masking/HMAC/nullification.",
+        ],
     sqlSteps:
       dependencyCount === 0
         ? [
-            "BEGIN ISOLATION LEVEL REPEATABLE READ;",
-            `SELECT ... FROM ${rootTable} WHERE ${rootContext.rootIdColumn} = '${String(subjectId)}' FOR UPDATE;`,
-            `DELETE FROM ${rootTable} WHERE ${rootContext.rootIdColumn} = '${String(subjectId)}';`,
-            `INSERT INTO ${outboxTable} (...) VALUES (...);`,
-            "COMMIT;",
-          ]
+          "BEGIN ISOLATION LEVEL REPEATABLE READ;",
+          `SELECT ... FROM ${rootTable} WHERE ${rootContext.rootIdColumn} = '${String(subjectId)}' FOR UPDATE;`,
+          `DELETE FROM ${rootTable} WHERE ${rootContext.rootIdColumn} = '${String(subjectId)}';`,
+          `INSERT INTO ${outboxTable} (...) VALUES (...);`,
+          "COMMIT;",
+        ]
         : [
-            "BEGIN ISOLATION LEVEL REPEATABLE READ;",
-            `SELECT ... FROM ${rootTable} WHERE ${rootContext.rootIdColumn} = '${String(subjectId)}' FOR UPDATE;`,
-            `INSERT INTO ${vaultTable} (... retention_expiry='${retentionExpiry.toISOString()}', notification_due_at='${notificationDueAt.toISOString()}', applied_rule_name='${appliedRuleName}');`,
-            `INSERT INTO ${keyTable} (...);`,
-            `UPDATE ${rootTable} SET {${mutationColumns}} = <rule-driven values> WHERE ${rootContext.rootIdColumn} = '${String(subjectId)}';`,
-            `INSERT INTO ${outboxTable} (...) VALUES (...);`,
-            "COMMIT;",
-          ],
+          "BEGIN ISOLATION LEVEL REPEATABLE READ;",
+          `SELECT ... FROM ${rootTable} WHERE ${rootContext.rootIdColumn} = '${String(subjectId)}' FOR UPDATE;`,
+          `INSERT INTO ${vaultTable} (... retention_expiry='${retentionExpiry.toISOString()}', notification_due_at='${notificationDueAt.toISOString()}', applied_rule_name='${appliedRuleName}');`,
+          `INSERT INTO ${keyTable} (...);`,
+          `UPDATE ${rootTable} SET {${mutationColumns}} = <rule-driven values> WHERE ${rootContext.rootIdColumn} = '${String(subjectId)}';`,
+          `INSERT INTO ${outboxTable} (...) VALUES (...);`,
+          "COMMIT;",
+        ],
   };
 }
 

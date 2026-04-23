@@ -1,4 +1,4 @@
-import type { VaultRecord } from "./support";
+import type { VaultRecord } from "../support";
 
 /**
  * Normalized mail message emitted by the pre-erasure notifier.

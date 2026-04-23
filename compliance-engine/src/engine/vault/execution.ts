@@ -1,25 +1,25 @@
 import postgres from "postgres";
-import { encryptGCMBytes } from "../crypto/aes";
-import { generateDEK, wrapKey } from "../crypto/envelope";
-import { getDependencyGraph } from "../db/graph";
-import { fail } from "../errors";
-import { bytesToBase64, bytesToHex } from "../utils/encoding";
-import type { VaultUserOptions, VaultUserResult } from "./contracts";
+import { encryptGCMBytes } from "../../crypto/aes";
+import { generateDEK, wrapKey } from "../../crypto/envelope";
+import { getDependencyGraph } from "../../db/graph";
+import { fail } from "../../errors";
+import { bytesToBase64, bytesToHex } from "../../utils/encoding";
+import type { VaultUserOptions, VaultUserResult } from "../contracts";
 import {
   createPseudonym,
   enqueueOutboxEvent,
   getVaultRecordByUserId,
-} from "./support";
+} from "../support";
 import {
   buildHardDeleteEventIdempotencyKey,
   buildVaultEventIdempotencyKey,
   computeMutationValue,
   normalizeRootRowValue,
   type RootMutationContext,
-} from "./vault.context";
-import { evaluateRetention, resolveRetentionWindow } from "./vault.retention";
-import { mutateSatelliteTargets } from "./vault.satellite-mutations";
-import { finalizeVaultResult, ShadowModeRollback } from "./vault.shadow";
+} from "./context";
+import { evaluateRetention, resolveRetentionWindow } from "./retention";
+import { mutateSatelliteTargets } from "./satellite-mutations";
+import { finalizeVaultResult, ShadowModeRollback } from "./shadow";
 
 /**
  * Prepared inputs shared across the live vault transaction.
@@ -53,9 +53,9 @@ export async function runVaultMutation(
   subjectId: string | number,
   context: PreparedVaultExecutionContext
 ): Promise<VaultUserResult> {
-  let dek: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
-  let plaintextPiiBuffer: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
-  let encryptedPiiBuffer: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+  let dek: Uint8Array = new Uint8Array(0);
+  let plaintextPiiBuffer: Uint8Array = new Uint8Array(0);
+  let encryptedPiiBuffer: Uint8Array = new Uint8Array(0);
 
   try {
     try {

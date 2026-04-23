@@ -1,10 +1,10 @@
-import { fail, workerError } from "../errors";
-import { getLogger } from "../observability/logger";
+import { fail, workerError } from "../../errors";
+import { getLogger } from "../../observability/logger";
 import type {
   FetchDispatcherOptions,
   OutboxEvent,
-} from "./outbox.shared";
-import { computeRequestSignature } from "./request-signing";
+} from "./shared";
+import { computeRequestSignature } from "../request-signing";
 
 interface ControlPlaneOutboxPayload {
   request_id?: string | null;

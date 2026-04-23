@@ -119,10 +119,10 @@ async function main() {
 
     sqlReplica = config.database.replica_db_url
       ? postgres(config.database.replica_db_url, {
-          max: 10,
-          idle_timeout: 20,
-          connect_timeout: 10,
-        })
+        max: 10,
+        idle_timeout: 20,
+        connect_timeout: 10,
+      })
       : undefined;
 
     await runMigrations(sql, config.database.engine_schema);

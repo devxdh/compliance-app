@@ -1,9 +1,9 @@
 import postgres from "postgres";
-import { asWorkerError, fail } from "../errors";
+import { asWorkerError, fail } from "../../errors";
 import {
   calculateRetryDelayMs,
   type OutboxEvent,
-} from "./outbox.shared";
+} from "./shared";
 
 /**
  * Claims one leased batch of due outbox events.

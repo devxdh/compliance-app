@@ -1,8 +1,8 @@
 import type postgres from "postgres";
-import { fail } from "../errors";
-import { sha256Hex } from "../utils/digest";
-import { canonicalJsonStringify } from "../utils/json";
-import type { OutboxRow, OutboxTailRow, SqlExecutor } from "./support.types";
+import { fail } from "../../errors";
+import { sha256Hex } from "../../utils/digest";
+import { canonicalJsonStringify } from "../../utils/json";
+import type { OutboxRow, OutboxTailRow, SqlExecutor } from "./types";
 
 /**
  * Enqueues a tamper-evident outbox event inside the current transaction scope.

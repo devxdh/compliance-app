@@ -1,10 +1,10 @@
 import type postgres from "postgres";
-import type { SatelliteTarget } from "../config/worker";
-import { generateHMAC } from "../crypto/hmac";
-import { fail } from "../errors";
-import { bytesToBase64 } from "../utils/encoding";
-import { redactSatelliteTable } from "./satellite";
-import { normalizeRootRowValue, type RootMutationContext } from "./vault.context";
+import type { SatelliteTarget } from "../../config/worker";
+import { generateHMAC } from "../../crypto/hmac";
+import { fail } from "../../errors";
+import { bytesToBase64 } from "../../utils/encoding";
+import { redactSatelliteTable } from "../satellite";
+import { normalizeRootRowValue, type RootMutationContext } from "./context";
 
 const DEFAULT_SATELLITE_BATCH_SIZE = 1000;
 

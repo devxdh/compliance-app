@@ -1,4 +1,4 @@
-import type { VaultUserResult } from "./contracts";
+import type { VaultUserResult } from "../contracts";
 
 /**
  * Internal control-flow error used to force rollback during `shadowMode`.

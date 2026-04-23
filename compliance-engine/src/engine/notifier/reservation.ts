@@ -1,7 +1,7 @@
 import postgres from "postgres";
-import { fail } from "../errors";
-import type { NoticeReservation } from "./notifier.types";
-import type { VaultRecord } from "./support";
+import { fail } from "../../errors";
+import type { NoticeReservation } from "./types";
+import type { VaultRecord } from "../support";
 
 /**
  * Reserves a notification lease on a vault row and loads the wrapped DEK needed for decryption.

@@ -1,28 +1,28 @@
 import postgres from "postgres";
-import { decryptGCMBytes } from "../crypto/aes";
-import { unwrapKey } from "../crypto/envelope";
-import { fail } from "../errors";
-import { logError, getLogger } from "../observability/logger";
-import { base64ToBytes } from "../utils/encoding";
+import { decryptGCMBytes } from "../../crypto/aes";
+import { unwrapKey } from "../../crypto/envelope";
+import { fail } from "../../errors";
+import { logError, getLogger } from "../../observability/logger";
+import { base64ToBytes } from "../../utils/encoding";
 import type {
   DispatchNoticeOptions,
   DispatchNoticeResult,
   WorkerSecrets,
-} from "./contracts";
+} from "../contracts";
 import {
   assertWorkerSecrets,
   enqueueOutboxEvent,
   getVaultRecordByUserId,
   resolveSchemas,
-} from "./support";
-import { buildNoticeDryRunPlan, buildNotificationIdempotencyKey, resolveNoticeColumns, resolveNotificationLeaseSeconds } from "./notifier.config";
-import { extractNoticeRecipient } from "./notifier.payload";
-import { clearNoticeLease, reserveNotice } from "./notifier.reservation";
-import type { MockMailer } from "./notifier.types";
+} from "../support";
+import { buildNoticeDryRunPlan, buildNotificationIdempotencyKey, resolveNoticeColumns, resolveNotificationLeaseSeconds } from "./config";
+import { extractNoticeRecipient } from "./payload";
+import { clearNoticeLease, reserveNotice } from "./reservation";
+import type { MockMailer } from "./types";
 
 const logger = getLogger({ component: "notifier" });
 
-export type { MailMessage, MockMailer } from "./notifier.types";
+export type { MailMessage, MockMailer } from "./types";
 
 /**
  * Dispatches the pre-erasure notice for a vaulted subject.

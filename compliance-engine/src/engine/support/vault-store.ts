@@ -1,5 +1,5 @@
-import type { SqlExecutor, VaultRecord } from "./support.types";
-import { DESTROYED_PII_SENTINEL } from "./support.types";
+import type { SqlExecutor, VaultRecord } from "./types";
+import { DESTROYED_PII_SENTINEL } from "./types";
 
 /**
  * Fetches a vault row by root identity tuple.

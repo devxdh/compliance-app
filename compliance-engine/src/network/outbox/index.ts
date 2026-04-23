@@ -5,15 +5,15 @@
  */
 
 import postgres from "postgres";
-import { assertIdentifier } from "../db/identifiers";
-import { logError, getLogger } from "../observability/logger";
-import { sendToAPI } from "./outbox.dispatcher";
+import { assertIdentifier } from "../../db/identifiers";
+import { logError, getLogger } from "../../observability/logger";
+import { sendToAPI } from "./dispatcher";
 import {
   claimOutboxBatch,
   markOutboxEventFailed,
   markOutboxEventProcessed,
   releaseOutboxLease,
-} from "./outbox.store";
+} from "./store";
 import {
   DEFAULT_BASE_BACKOFF_MS,
   DEFAULT_BATCH_SIZE,
@@ -25,8 +25,8 @@ import {
   type ProcessOutboxOptions,
   type ProcessOutboxResult,
   calculateRetryDelayMs,
-} from "./outbox.shared";
-import { workerError } from "../errors";
+} from "./shared";
+import { workerError } from "../../errors";
 
 export {
   calculateRetryDelayMs,
@@ -34,8 +34,8 @@ export {
   type OutboxEvent,
   type ProcessOutboxOptions,
   type ProcessOutboxResult,
-} from "./outbox.shared";
-export { createFetchDispatcher, sendToAPI } from "./outbox.dispatcher";
+} from "./shared";
+export { createFetchDispatcher, sendToAPI } from "./dispatcher";
 
 const logger = getLogger({ component: "outbox" });
 

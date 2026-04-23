@@ -1,5 +1,5 @@
-import { fail } from "../errors";
-import type { NoticeColumns } from "./notifier.config";
+import { fail } from "../../errors";
+import type { NoticeColumns } from "./config";
 
 const textDecoder = new TextDecoder();
 

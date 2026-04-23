@@ -1,6 +1,6 @@
-import { assertIdentifier } from "../db/identifiers";
-import { fail } from "../errors";
-import type { DispatchNoticeOptions } from "./contracts";
+import { assertIdentifier } from "../../db/identifiers";
+import { fail } from "../../errors";
+import type { DispatchNoticeOptions } from "../contracts";
 
 /**
  * Explicit root payload columns used to build the pre-erasure notice.

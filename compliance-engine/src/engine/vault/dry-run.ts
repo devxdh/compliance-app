@@ -1,9 +1,9 @@
 import postgres from "postgres";
-import { getDependencyGraph } from "../db/graph";
-import type { VaultUserResult } from "./contracts";
-import { getVaultRecordByUserId } from "./support";
-import { buildVaultDryRunPlan, type RootMutationContext } from "./vault.context";
-import { resolveRetentionWindow } from "./vault.retention";
+import { getDependencyGraph } from "../../db/graph";
+import type { VaultUserResult } from "../contracts";
+import { getVaultRecordByUserId } from "../support";
+import { buildVaultDryRunPlan, type RootMutationContext } from "./context";
+import { resolveRetentionWindow } from "./retention";
 
 /**
  * Prepared inputs shared across vault dry-run evaluation.
@@ -55,13 +55,13 @@ export async function runVaultDryRun(
   const existingVault =
     typeof sql === "function"
       ? await getVaultRecordByUserId(
-          sql,
-          context.engineSchema,
-          context.appSchema,
-          subjectId,
-          context.rootContext.rootTable,
-          context.tenantId
-        )
+        sql,
+        context.engineSchema,
+        context.appSchema,
+        subjectId,
+        context.rootContext.rootTable,
+        context.tenantId
+      )
       : null;
 
   return {
