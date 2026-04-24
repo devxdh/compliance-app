@@ -99,6 +99,7 @@ export interface VaultUserResult extends WorkerOperationResult {
   dependencyCount: number;
   retentionYears: number | null;
   appliedRuleName: string | null;
+  appliedRuleCitation: string | null;
   retentionExpiry: string | null;
   notificationDueAt: string | null;
   pseudonym: string | null;

@@ -205,6 +205,16 @@ export async function transitionJobFromOutbox(
             THEN ${input.shredDueAt ?? null}
           ELSE shred_due_at
         END,
+        applied_rule_name = CASE
+          WHEN ${input.eventType === "USER_VAULTED" || input.eventType === "USER_HARD_DELETED"}
+            THEN ${input.appliedRuleName ?? null}
+          ELSE applied_rule_name
+        END,
+        applied_rule_citation = CASE
+          WHEN ${input.eventType === "USER_VAULTED" || input.eventType === "USER_HARD_DELETED"}
+            THEN ${input.appliedRuleCitation ?? null}
+          ELSE applied_rule_citation
+        END,
         shredded_at = CASE
           WHEN ${input.eventType === "SHRED_SUCCESS" || input.eventType === "USER_HARD_DELETED"}
             THEN ${input.shreddedAt ?? input.now}

@@ -15,6 +15,7 @@ import {
   assertOutboxMetadata,
   buildOutboxPayload,
   isCreateRequestEquivalent,
+  parseVaultLifecyclePolicy,
   isReplayEquivalent,
   parseVaultLifecycleSchedule,
 } from "./guards";
@@ -34,6 +35,8 @@ export class ControlPlaneService {
   private readonly workerClientName: string;
   private readonly maxOutboxPayloadBytes: number;
   private readonly webhookTimeoutMs: number;
+  private readonly shadowBurnInRequired: boolean;
+  private readonly shadowRequiredSuccesses: number;
 
   constructor(options: ServiceOptions) {
     this.repository = options.repository;
@@ -42,6 +45,8 @@ export class ControlPlaneService {
     this.workerClientName = options.workerClientName;
     this.maxOutboxPayloadBytes = options.maxOutboxPayloadBytes;
     this.webhookTimeoutMs = options.webhookTimeoutMs ?? 10_000;
+    this.shadowBurnInRequired = options.shadowBurnInRequired ?? true;
+    this.shadowRequiredSuccesses = options.shadowRequiredSuccesses ?? 100;
     this.now = options.now ?? (() => new Date());
   }
 
@@ -67,6 +72,10 @@ export class ControlPlaneService {
       input.event_type === "USER_VAULTED"
         ? parseVaultLifecycleSchedule(input.payload)
         : null;
+    const policy =
+      input.event_type === "USER_VAULTED" || input.event_type === "USER_HARD_DELETED"
+        ? parseVaultLifecyclePolicy(input.payload)
+        : null;
     const shreddedAt = isTerminalEventType(input.event_type)
       ? new Date(input.event_timestamp)
       : undefined;
@@ -78,6 +87,8 @@ export class ControlPlaneService {
       notificationDueAt: schedule?.notificationDueAt,
       shredDueAt: schedule?.shredDueAt,
       shreddedAt,
+      appliedRuleName: policy?.appliedRuleName,
+      appliedRuleCitation: policy?.appliedRuleCitation,
     });
 
     if (isTerminalEventType(input.event_type)) {
@@ -148,6 +159,27 @@ export class ControlPlaneService {
       });
     }
 
+    if (
+      this.shadowBurnInRequired &&
+      this.shadowRequiredSuccesses > 0 &&
+      !input.shadow_mode &&
+      !client.live_mutation_enabled
+    ) {
+      fail({
+        code: "API_LIVE_MUTATION_BURN_IN_REQUIRED",
+        title: "Shadow-mode burn-in required",
+        detail: `Worker client ${client.name} must complete ${this.shadowRequiredSuccesses} successful shadow-mode vault tasks before live mutation. Current successes: ${client.shadow_success_count}.`,
+        status: 409,
+        category: "configuration",
+        retryable: false,
+        context: {
+          clientName: client.name,
+          currentSuccesses: client.shadow_success_count,
+          requiredSuccesses: this.shadowRequiredSuccesses,
+        },
+      });
+    }
+
     const created = await this.repository.createJobAndQueueTask({
       jobId,
       taskId,
@@ -207,9 +239,22 @@ export class ControlPlaneService {
    *
    * @param clientName - Worker client name for lease attribution.
    * @param clientId - Authenticated worker client id.
+   * @param heartbeat - Worker config fingerprint metadata from sync headers.
    * @returns Pending task envelope or `pending: false`.
    */
-  async syncWorker(clientName: string, clientId: string) {
+  async syncWorker(
+    clientName: string,
+    clientId: string,
+    heartbeat: { configHash: string; configVersion?: string; dpoIdentifier?: string }
+  ) {
+    await this.repository.insertWorkerConfigHeartbeat({
+      clientId,
+      configHash: heartbeat.configHash,
+      configVersion: heartbeat.configVersion,
+      dpoIdentifier: heartbeat.dpoIdentifier,
+      now: this.now(),
+    });
+
     const task = await this.repository.claimNextTask(
       clientId,
       clientName,
@@ -294,14 +339,30 @@ export class ControlPlaneService {
    * @returns Updated task status payload or `null` when task is unknown.
    */
   async ackWorkerTask(taskId: string, input: WorkerAckInput) {
+    const now = this.now();
     const task = await this.repository.ackTask(
       taskId,
       input.status,
       input.result,
-      this.now()
+      now
     );
     if (!task) {
       return null;
+    }
+
+    if (
+      input.status === "completed" &&
+      task.task_type === "VAULT_USER" &&
+      task.status === "COMPLETED" &&
+      task.payload.shadow_mode === true &&
+      this.shadowRequiredSuccesses > 0
+    ) {
+      await this.repository.recordShadowVaultSuccessForTask(
+        task.id,
+        task.client_id,
+        this.shadowRequiredSuccesses,
+        now
+      );
     }
 
     return {

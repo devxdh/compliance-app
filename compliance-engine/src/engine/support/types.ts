@@ -51,6 +51,7 @@ export interface VaultRecord {
   legal_framework: string | null;
   actor_opaque_id: string | null;
   applied_rule_name: string | null;
+  applied_rule_citation: string | null;
   retention_expiry: Date;
   notification_due_at: Date;
   notification_sent_at: Date | null;

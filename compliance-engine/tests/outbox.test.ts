@@ -33,7 +33,8 @@ describe("Network Outbox Relay", () => {
     idempotencyKey: string,
     userHash: string,
     eventType: string,
-    nextAttemptAt: Date = new Date()
+    nextAttemptAt: Date = new Date(),
+    createdAt: Date = new Date()
   ) {
     await sql`
       INSERT INTO ${sql(engineSchema)}.outbox (
@@ -59,8 +60,8 @@ describe("Network Outbox Relay", () => {
         'pending',
         0,
         ${nextAttemptAt},
-        NOW(),
-        NOW()
+        ${createdAt},
+        ${createdAt}
       )
     `;
   }
@@ -81,6 +82,42 @@ describe("Network Outbox Relay", () => {
     const rows = await sql`SELECT status, processed_at FROM ${sql(engineSchema)}.outbox ORDER BY idempotency_key ASC`;
     expect(rows.every((row) => row.status === "processed")).toBe(true);
     expect(rows.every((row) => row.processed_at !== null)).toBe(true);
+  });
+
+  it("prioritizes terminal outbox events during catch-up", async () => {
+    const { engineSchema } = await prepare();
+    const baseTime = new Date("2026-04-15T00:00:00.000Z");
+    const laterTime = new Date("2026-04-15T00:00:01.000Z");
+
+    await seedEvent(
+      engineSchema,
+      "vault-old",
+      "user-old",
+      "USER_VAULTED",
+      baseTime,
+      baseTime
+    );
+    await seedEvent(
+      engineSchema,
+      "shred-new",
+      "user-new",
+      "SHRED_SUCCESS",
+      baseTime,
+      laterTime
+    );
+
+    const delivered: string[] = [];
+    const result = await processOutbox(
+      sql,
+      async (event) => {
+        delivered.push(event.idempotency_key);
+        return true;
+      },
+      { engineSchema, batchSize: 2, now: laterTime }
+    );
+
+    expect(result.processed).toBe(2);
+    expect(delivered).toEqual(["shred-new", "vault-old"]);
   });
 
   it("chains outbox events with tamper-evident hashes", async () => {

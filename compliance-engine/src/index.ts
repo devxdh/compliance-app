@@ -1,16 +1,19 @@
 import postgres from "postgres";
+import { readFileSync } from "node:fs";
 import { assertConfigSchemaCompatibility } from "./bootstrap/config-compatibility";
 import { readRuntimeSecret } from "./config/secrets";
 import { verifySignedWorkerConfig } from "./config/signature";
 import { assertSchemaIntegrity } from "./bootstrap/integrity";
-import { readWorkerConfig } from "./config/worker";
+import { readWorkerConfigFromRuntime } from "./config/worker";
 import { runMigrations } from "./db/migrations";
+import { createRedactingSqlDebugLogger } from "./db/sql-debug";
 import { workerError } from "./errors";
 import type { MockMailer } from "./engine/notifier";
 import { createFetchDispatcher } from "./network/outbox";
 import { createControlPlaneApiClient } from "./network/control-plane";
 import { getLogger, logError } from "./observability/logger";
 import { registerProcessGuards } from "./runtime/guards";
+import { sha256Hex } from "./utils/digest";
 import { ComplianceWorker } from "./worker";
 
 const logger = getLogger({ component: "bootstrap" });
@@ -105,7 +108,12 @@ async function main() {
 
   const configPath = new URL("../compliance.worker.yml", import.meta.url);
   await verifySignedWorkerConfig(process.env, configPath);
-  const config = readWorkerConfig(process.env, configPath);
+  const workerConfigHash = await sha256Hex(readFileSync(configPath, "utf8"));
+  const config = await readWorkerConfigFromRuntime(process.env, configPath);
+  const postgresDebug =
+    (process.env.LOG_LEVEL ?? "info").toLowerCase() === "debug"
+      ? createRedactingSqlDebugLogger(logger, Object.keys(config.graph.root_pii_columns))
+      : undefined;
 
   let sql: postgres.Sql | undefined;
   let sqlReplica: postgres.Sql | undefined;
@@ -115,6 +123,7 @@ async function main() {
       max: 10,
       idle_timeout: 20,
       connect_timeout: 10,
+      debug: postgresDebug,
     });
 
     sqlReplica = config.database.replica_db_url
@@ -122,6 +131,7 @@ async function main() {
         max: 10,
         idle_timeout: 20,
         connect_timeout: 10,
+        debug: postgresDebug,
       })
       : undefined;
 
@@ -169,6 +179,9 @@ async function main() {
       syncUrl: process.env.API_SYNC_URL ?? "http://localhost:3000/api/v1/worker/sync",
       ackBaseUrl: process.env.API_BASE_URL ?? "http://localhost:3000/api/v1/worker/tasks",
       workerAuthHeaders,
+      workerConfigHash,
+      workerConfigVersion: config.legal_attestation.configuration_version,
+      workerDpoIdentifier: config.legal_attestation.dpo_identifier,
       pushOutboxEvent,
       requestSigningSecret,
       timeoutMs: 10_000,
@@ -221,6 +234,9 @@ async function main() {
         replicaEnabled: Boolean(sqlReplica),
         metricsPort,
         mailerTimeoutMs,
+        workerConfigHash,
+        workerConfigVersion: config.legal_attestation.configuration_version,
+        dpoIdentifier: config.legal_attestation.dpo_identifier,
       },
       "DPDP Compliance Worker booted"
     );

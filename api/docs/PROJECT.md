@@ -8,6 +8,7 @@ This document describes the current implementation in `api/src` for the Zero-Tru
 - Worker endpoints are authenticated using `x-client-id` + `Authorization: Bearer <token>`.
 - Worker tokens are stored as SHA-256 hashes (`worker_api_key_hash`) using Web Crypto (`globalThis.crypto`).
 - Outbox ingestion enforces WORM hash chaining and idempotency semantics.
+- Live mutations are blocked until a worker client completes the configured shadow-mode burn-in threshold.
 
 ### Runtime and Stack Constraints
 
@@ -21,7 +22,7 @@ This document describes the current implementation in `api/src` for the Zero-Tru
 
 Migrations in `src/db/migrations.ts` provision:
 
-- `clients`: tenant registry and worker auth hash
+- `clients`: tenant registry, worker auth hash, shadow-mode burn-in counters, and live-mutation flag
 - `erasure_jobs`: request lifecycle state machine
 - `task_queue`: worker task leasing with lease expiry
 - `audit_ledger`: tamper-evident worker event ledger (`previous_hash`, `current_hash`)
@@ -54,6 +55,8 @@ Performance index highlights:
 - Non-equivalent reuse of the same `idempotencyKey` is rejected.
 - Chain continuity is enforced: `previousHash` must match the latest ledger hash pointer.
 - Outbox payload size is bounded via `MAX_OUTBOX_PAYLOAD_BYTES`.
+- `SHADOW_BURN_IN_REQUIRED=true` requires 100 successful shadow `VAULT_USER` completions by default before the Control Plane accepts live `shadow_mode: false` requests for that worker client.
+- Task failures retry with exponential backoff until `TASK_MAX_ATTEMPTS`, then move to `DEAD_LETTER` for operator recovery.
 
 ### Test Guarantees
 

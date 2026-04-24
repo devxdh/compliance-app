@@ -1,6 +1,7 @@
 import type {
   AuditLedgerRow,
   InsertAuditLedgerEventInput,
+  InsertWorkerConfigHeartbeatInput,
   RepositoryContext,
 } from "./types";
 
@@ -52,6 +53,51 @@ export async function insertAuditLedgerEvent(
       ${context.sql.json(input.payload as import("postgres").JSONValue)},
       ${input.previousHash},
       ${input.currentHash},
+      ${input.now}
+    )
+    ON CONFLICT (worker_idempotency_key) DO NOTHING
+    RETURNING id
+  `;
+
+  return rows.length > 0;
+}
+
+/**
+ * Appends an idempotent worker-config heartbeat marker to the audit ledger.
+ *
+ * Heartbeat rows intentionally do not advance the WORM chain head: `previous_hash` and
+ * `current_hash` are set to the same value so worker outbox chain validation remains stable.
+ *
+ * @param context - Repository SQL context.
+ * @param input - Worker config heartbeat metadata.
+ * @returns `true` when inserted, `false` when already observed for this config hash.
+ */
+export async function insertWorkerConfigHeartbeat(
+  context: RepositoryContext,
+  input: InsertWorkerConfigHeartbeatInput
+): Promise<boolean> {
+  const latestHash = (await getLatestAuditHash(context, input.clientId)) ?? "GENESIS";
+  const rows = await context.sql<{ id: string }[]>`
+    INSERT INTO ${context.sql(context.schema)}.audit_ledger (
+      client_id,
+      worker_idempotency_key,
+      event_type,
+      payload,
+      previous_hash,
+      current_hash,
+      created_at
+    ) VALUES (
+      ${input.clientId},
+      ${`worker-config:${input.clientId}:${input.configHash}`},
+      'WORKER_CONFIG_HEARTBEAT',
+      ${context.sql.json({
+    config_hash: input.configHash,
+    configuration_version: input.configVersion ?? null,
+    dpo_identifier: input.dpoIdentifier ?? null,
+    observed_at: input.now.toISOString(),
+  } as import("postgres").JSONValue)},
+      ${latestHash},
+      ${latestHash},
       ${input.now}
     )
     ON CONFLICT (worker_idempotency_key) DO NOTHING

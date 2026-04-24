@@ -7,9 +7,9 @@ It keeps the existing `compliance-engine` worker package intact and adds a sibli
 ## Workspace Layout
 
 - `api/`
-  Bun + TypeScript control-plane package scaffold for the future central API.
+  Bun + Hono control plane for metadata-only erasure orchestration, task leasing, WORM ledger ingestion, Certificates of Erasure, admin recovery, usage accounting, and shadow burn-in enforcement.
 - `compliance-engine/`
-  Existing zero-trust worker/data-plane package. Its source, tests, and docs remain in place.
+  Bun + TypeScript worker sidecar for in-VPC graph traversal, evidence-based retention, cryptographic vaulting, notification, shredding, outbox relay, and metrics.
 
 ## Tooling Decisions
 
@@ -29,17 +29,18 @@ bun run api:typecheck
 bun run engine:test
 bun run engine:test-ui
 bun run engine:typecheck
+bun run local:e2e
 bun run typecheck
 bun run test
 bun run check
 ```
 
-`bun run test` executes the worker test suite from `compliance-engine/`, so a reachable PostgreSQL instance is still required for the integration-heavy engine tests.
+`bun run test` executes the worker test suite from `compliance-engine/`, so a reachable PostgreSQL instance is still required for the integration-heavy engine tests. Use `bun run api:test` for the Control Plane suite and `bun run local:e2e` for the Docker Compose smoke path.
 
 The API scaffold defaults to port `3000`; override `PORT` if that port is already occupied in your local environment.
 
 ## Notes
 
 - `compliance-engine` stays at the same path to avoid breaking the existing worker codebase.
-- The `api` package is intentionally minimal for now; it establishes the monorepo boundary without guessing the full control-plane implementation.
-- The engine package still owns its domain-specific docs under `compliance-engine/docs/`.
+- Architecture rules are captured in `docs/ARCHITECTURE.md` and `docs/DECISIONS.md`.
+- Kubernetes and local deployment assets live under `deploy/`.

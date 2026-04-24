@@ -63,6 +63,12 @@ function buildConfig() {
     integrity: {
       expected_schema_hash: "1".repeat(64),
     },
+    legal_attestation: {
+      dpo_identifier: "dpo@example.com",
+      configuration_version: "v-test",
+      legal_review_date: "2026-04-20",
+      acknowledgment: "Configuration reviewed by the Data Protection Officer.",
+    },
     masterKey: TEST_SECRETS.kek,
     hmacKey: TEST_SECRETS.hmacKey,
   };
@@ -212,6 +218,7 @@ describe("ComplianceWorker failure handling", () => {
       dependencyCount: 1,
       retentionYears: 10,
       appliedRuleName: "PMLA_FINANCIAL",
+      appliedRuleCitation: "Prevention of Money Laundering Act, 2002, Sec 12",
       retentionExpiry: "2026-01-01T00:00:00.000Z",
       notificationDueAt: "2025-12-30T00:00:00.000Z",
       pseudonym: "dpdp_example@dpdp.invalid",

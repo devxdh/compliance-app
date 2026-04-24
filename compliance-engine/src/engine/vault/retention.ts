@@ -19,6 +19,7 @@ export interface RetentionEvaluationConfig {
 export interface RetentionEvaluationResult {
   retentionYears: number;
   appliedRuleName: string;
+  appliedRuleCitation: string;
 }
 
 /**
@@ -87,6 +88,7 @@ export async function evaluateRetention(
   const rootIdColumn = assertIdentifier(rules.root_id_column, "graph root id column");
   let selectedYears = resolveRetentionYears(rules.default_retention_years);
   let selectedRuleName = "DEFAULT";
+  let selectedRuleCitation = "Configured default_retention_years policy";
 
   for (const rule of rules.retention_rules) {
     for (const tableName of rule.if_has_data_in) {
@@ -104,6 +106,7 @@ export async function evaluateRetention(
       if (match?.exists && rule.retention_years > selectedYears) {
         selectedYears = rule.retention_years;
         selectedRuleName = rule.rule_name;
+        selectedRuleCitation = rule.legal_citation;
       }
     }
   }
@@ -111,5 +114,6 @@ export async function evaluateRetention(
   return {
     retentionYears: selectedYears,
     appliedRuleName: selectedRuleName,
+    appliedRuleCitation: selectedRuleCitation,
   };
 }

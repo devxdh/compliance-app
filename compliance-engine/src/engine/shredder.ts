@@ -192,6 +192,7 @@ export async function shredUser(
         legal_framework: lockedVault.legal_framework,
         actor_opaque_id: lockedVault.actor_opaque_id,
         applied_rule_name: lockedVault.applied_rule_name,
+        applied_rule_citation: lockedVault.applied_rule_citation,
         event_timestamp: now.toISOString(),
         root_schema: appSchema,
         root_table: rootTable,

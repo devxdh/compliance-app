@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS mock_app.marketing_leads (
 
 CREATE TABLE IF NOT EXISTS mock_app.profiles (
   id BIGSERIAL PRIMARY KEY,
-  user_id TEXT NOT NULL REFERENCES mock_app.users(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES mock_app.users(id),
   bio TEXT NOT NULL
 );
 

@@ -9,6 +9,7 @@ import {
   requestIdParamSchema,
   workerAckSchema,
   workerHeaderSchema,
+  workerSyncHeaderSchema,
   workerOutboxEventSchema,
 } from "./schemas";
 import type { ControlPlaneService } from "./service";
@@ -92,10 +93,14 @@ export function createControlPlaneRouter(service: ControlPlaneService) {
     }
   );
 
-  router.get("/worker/sync", zValidator("header", workerHeaderSchema, validationHook("header")), async (c) => {
+  router.get("/worker/sync", zValidator("header", workerSyncHeaderSchema, validationHook("header")), async (c) => {
     const header = c.req.valid("header");
     const clientId = await authorizeWorker(header);
-    const synced = await service.syncWorker(header["x-client-id"], clientId);
+    const synced = await service.syncWorker(header["x-client-id"], clientId, {
+      configHash: header["x-worker-config-hash"].toLowerCase(),
+      configVersion: header["x-worker-config-version"],
+      dpoIdentifier: header["x-worker-dpo-identifier"],
+    });
     return c.json(synced, 200);
   });
 
@@ -154,6 +159,14 @@ export function createControlPlaneRouter(service: ControlPlaneService) {
         subject_opaque_id: certificate.subject_opaque_id,
         method: certificate.method,
         legal_framework: certificate.legal_framework,
+        applied_rule_name:
+          typeof (certificate.payload as Record<string, unknown>)?.applied_rule_name === "string"
+            ? ((certificate.payload as Record<string, unknown>).applied_rule_name as string)
+            : null,
+        applied_rule_citation:
+          typeof (certificate.payload as Record<string, unknown>)?.applied_rule_citation === "string"
+            ? ((certificate.payload as Record<string, unknown>).applied_rule_citation as string)
+            : null,
         shredded_at: certificate.shredded_at.toISOString(),
         final_worm_hash:
           typeof (certificate.payload as Record<string, unknown>)?.final_worm_hash === "string"

@@ -86,6 +86,9 @@ export interface ControlPlaneApiClientOptions {
     "x-client-id": string;
     authorization: string;
   };
+  workerConfigHash: string;
+  workerConfigVersion?: string;
+  workerDpoIdentifier?: string;
   pushOutboxEvent: ApiClient["pushOutboxEvent"];
   requestSigningSecret?: string;
   timeoutMs?: number;
@@ -213,6 +216,13 @@ export function createControlPlaneApiClient(options: ControlPlaneApiClientOption
         {
           headers: {
             ...options.workerAuthHeaders,
+            "x-worker-config-hash": options.workerConfigHash,
+            ...(options.workerConfigVersion
+              ? { "x-worker-config-version": options.workerConfigVersion }
+              : {}),
+            ...(options.workerDpoIdentifier
+              ? { "x-worker-dpo-identifier": options.workerDpoIdentifier }
+              : {}),
             ...(await signWorkerRequest(
               options.requestSigningSecret,
               options.workerAuthHeaders["x-client-id"],

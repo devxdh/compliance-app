@@ -24,6 +24,8 @@ describe("Control Plane API (Integration)", () => {
       now?: () => Date;
       taskMaxAttempts?: number;
       taskBaseBackoffMs?: number;
+      shadowBurnInRequired?: boolean;
+      shadowRequiredSuccesses?: number;
     } = {}
   ) {
     const controlSchema = uniqueSchema("control_api");
@@ -41,6 +43,8 @@ describe("Control Plane API (Integration)", () => {
       maxOutboxPayloadBytes: 2048,
       taskMaxAttempts: overrides.taskMaxAttempts,
       taskBaseBackoffMs: overrides.taskBaseBackoffMs,
+      shadowBurnInRequired: overrides.shadowBurnInRequired ?? false,
+      shadowRequiredSuccesses: overrides.shadowRequiredSuccesses,
       now: overrides.now,
     });
 
@@ -51,6 +55,9 @@ describe("Control Plane API (Integration)", () => {
     return {
       "x-client-id": "worker-1",
       authorization: `Bearer ${token}`,
+      "x-worker-config-hash": "ab".repeat(32),
+      "x-worker-config-version": "v-test",
+      "x-worker-dpo-identifier": "dpo@example.com",
     };
   }
 
@@ -345,6 +352,20 @@ describe("Control Plane API (Integration)", () => {
     expect(secondSync.status).toBe(200);
     expect(await secondSync.json()).toEqual({ pending: false });
 
+    const heartbeatEvents = await sql<{ event_type: string; payload: Record<string, unknown> }[]>`
+      SELECT event_type, payload
+      FROM ${sql(controlSchema)}.audit_ledger
+      WHERE event_type = 'WORKER_CONFIG_HEARTBEAT'
+    `;
+    expect(heartbeatEvents).toHaveLength(1);
+    expect(heartbeatEvents[0]?.payload).toEqual(
+      expect.objectContaining({
+        config_hash: "ab".repeat(32),
+        configuration_version: "v-test",
+        dpo_identifier: "dpo@example.com",
+      })
+    );
+
     const jobRows = await sql<{ subject_opaque_id: string; status: string }[]>`
       SELECT subject_opaque_id, status
       FROM ${sql(controlSchema)}.erasure_jobs
@@ -391,6 +412,117 @@ describe("Control Plane API (Integration)", () => {
     });
     expect(syncResponse.status).toBe(200);
     expect(await syncResponse.json()).toEqual({ pending: false });
+  });
+
+  it("enforces shadow-mode burn-in before accepting live mutation requests", async () => {
+    const { app, controlSchema } = await setup({
+      shadowBurnInRequired: true,
+      shadowRequiredSuccesses: 2,
+    });
+
+    const rejectedLive = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        buildErasureRequest({
+          subject_opaque_id: "usr_live_before_burn_in",
+          cooldown_days: 0,
+          shadow_mode: false,
+        })
+      ),
+    });
+    expect(rejectedLive.status).toBe(409);
+    expect(await rejectedLive.json()).toEqual(
+      expect.objectContaining({
+        code: "API_LIVE_MUTATION_BURN_IN_REQUIRED",
+      })
+    );
+
+    const completeShadowVault = async (subjectId: string) => {
+      const createResponse = await app.request("/api/v1/erasure-requests", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          buildErasureRequest({
+            subject_opaque_id: subjectId,
+            cooldown_days: 0,
+            shadow_mode: true,
+          })
+        ),
+      });
+      expect(createResponse.status).toBe(202);
+      const created = (await createResponse.json()) as { task_id: string };
+
+      const syncResponse = await app.request("/api/v1/worker/sync", {
+        method: "GET",
+        headers: buildWorkerAuthHeaders(),
+      });
+      expect(syncResponse.status).toBe(200);
+      const syncPayload = (await syncResponse.json()) as { pending: boolean; task?: { id: string } };
+      expect(syncPayload.pending).toBe(true);
+      expect(syncPayload.task?.id).toBe(created.task_id);
+
+      const ackResponse = await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...buildWorkerAuthHeaders(),
+        },
+        body: JSON.stringify({
+          status: "completed",
+          result: { action: "shadow_vaulted" },
+        }),
+      });
+      expect(ackResponse.status).toBe(200);
+      return created.task_id;
+    };
+
+    const firstShadowTaskId = await completeShadowVault("usr_shadow_1");
+    const replayAckResponse = await app.request(`/api/v1/worker/tasks/${firstShadowTaskId}/ack`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...buildWorkerAuthHeaders(),
+      },
+      body: JSON.stringify({
+        status: "completed",
+        result: { action: "shadow_vaulted" },
+      }),
+    });
+    expect(replayAckResponse.status).toBe(200);
+    await completeShadowVault("usr_shadow_2");
+
+    const [client] = await sql<{
+      shadow_success_count: number;
+      shadow_required_successes: number;
+      live_mutation_enabled: boolean;
+      live_mutation_enabled_at: Date | null;
+    }[]>`
+      SELECT shadow_success_count, shadow_required_successes, live_mutation_enabled, live_mutation_enabled_at
+      FROM ${sql(controlSchema)}.clients
+      WHERE name = 'worker-1'
+    `;
+    expect(client).toEqual(
+      expect.objectContaining({
+        shadow_success_count: 2,
+        shadow_required_successes: 2,
+        live_mutation_enabled: true,
+      })
+    );
+    expect(client?.live_mutation_enabled_at).toBeInstanceOf(Date);
+
+    const acceptedLive = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        buildErasureRequest({
+          subject_opaque_id: "usr_live_after_burn_in",
+          cooldown_days: 0,
+          shadow_mode: false,
+        })
+      ),
+    });
+    expect(acceptedLive.status).toBe(202);
   });
 
   it("requeues retryable task failures with exponential backoff before redispatch", async () => {
@@ -589,6 +721,7 @@ describe("Control Plane API (Integration)", () => {
       legal_framework: request.legal_framework,
       actor_opaque_id: request.actor_opaque_id,
       applied_rule_name: "PMLA_FINANCIAL",
+      applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
       event_timestamp: "2026-04-19T10:00:00.000Z",
       retention_years: 10,
       notification_due_at: "2036-04-17T10:00:00.000Z",
@@ -668,6 +801,7 @@ describe("Control Plane API (Integration)", () => {
       legal_framework: request.legal_framework,
       actor_opaque_id: request.actor_opaque_id,
       applied_rule_name: "PMLA_FINANCIAL",
+      applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
       event_timestamp: "2026-04-19T10:00:00.000Z",
       retention_years: 10,
       notification_due_at: "2036-04-17T10:00:00.000Z",
@@ -759,6 +893,7 @@ describe("Control Plane API (Integration)", () => {
       legal_framework: request.legal_framework,
       actor_opaque_id: request.actor_opaque_id,
       applied_rule_name: "PMLA_FINANCIAL",
+      applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
       event_timestamp: "2026-04-19T10:00:00.000Z",
       notification_due_at: "2036-04-17T10:00:00.000Z",
       retention_expiry: "2036-04-19T10:00:00.000Z",
@@ -789,6 +924,7 @@ describe("Control Plane API (Integration)", () => {
       legal_framework: request.legal_framework,
       actor_opaque_id: request.actor_opaque_id,
       applied_rule_name: "PMLA_FINANCIAL",
+      applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
       event_timestamp: "2036-04-17T10:00:00.000Z",
       sent_at: "2036-04-17T10:00:00.000Z",
     };
@@ -875,6 +1011,7 @@ describe("Control Plane API (Integration)", () => {
       legal_framework: request.legal_framework,
       actor_opaque_id: request.actor_opaque_id,
       applied_rule_name: "PMLA_FINANCIAL",
+      applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
       event_timestamp: "2026-04-19T10:00:00.000Z",
       notification_due_at: "2036-04-17T10:00:00.000Z",
       retention_expiry: "2036-04-19T10:00:00.000Z",
@@ -906,6 +1043,7 @@ describe("Control Plane API (Integration)", () => {
       legal_framework: request.legal_framework,
       actor_opaque_id: request.actor_opaque_id,
       applied_rule_name: "PMLA_FINANCIAL",
+      applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
       event_timestamp: "2036-04-17T10:00:00.000Z",
       sent_at: "2036-04-17T10:00:00.000Z",
     };
@@ -936,6 +1074,7 @@ describe("Control Plane API (Integration)", () => {
       legal_framework: request.legal_framework,
       actor_opaque_id: request.actor_opaque_id,
       applied_rule_name: "PMLA_FINANCIAL",
+      applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
       event_timestamp: "2036-04-19T10:00:00.000Z",
       shredded_at: "2036-04-19T10:00:00.000Z",
     };
@@ -966,12 +1105,16 @@ describe("Control Plane API (Integration)", () => {
       request_id: string;
       subject_opaque_id: string;
       legal_framework: string;
+      applied_rule_name: string | null;
+      applied_rule_citation: string | null;
       method: string;
       final_worm_hash: string;
     };
     expect(certificate.request_id).toBe(created.request_id);
     expect(certificate.subject_opaque_id).toBe(request.subject_opaque_id);
     expect(certificate.legal_framework).toBe(request.legal_framework);
+    expect(certificate.applied_rule_name).toBe("PMLA_FINANCIAL");
+    expect(certificate.applied_rule_citation).toBe("Prevention of Money Laundering Act, 2002, Sec 12");
     expect(certificate.method).toBe("CRYPTO_SHREDDING_DEK_DELETE");
     expect(certificate.final_worm_hash).toBe(shredHash);
 
@@ -1014,6 +1157,7 @@ describe("Control Plane API (Integration)", () => {
       legal_framework: request.legal_framework,
       actor_opaque_id: request.actor_opaque_id,
       applied_rule_name: "DEFAULT",
+      applied_rule_citation: "Configured default_retention_years policy",
       event_timestamp: "2036-04-19T10:00:00.000Z",
       shredded_at: "2036-04-19T10:00:00.000Z",
     };
@@ -1078,6 +1222,7 @@ describe("Control Plane API (Integration)", () => {
       legal_framework: "PMLA",
       actor_opaque_id: request.actor_opaque_id,
       applied_rule_name: "DEFAULT",
+      applied_rule_citation: "Configured default_retention_years policy",
       event_timestamp: "2026-04-19T10:00:00.000Z",
       retention_expiry: "2026-04-20T10:00:00.000Z",
       notification_due_at: "2026-04-19T12:00:00.000Z",
@@ -1153,6 +1298,7 @@ describe("Control Plane API (Integration)", () => {
         legal_framework: request.legal_framework,
         actor_opaque_id: request.actor_opaque_id,
         applied_rule_name: "PMLA_FINANCIAL",
+        applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
         event_timestamp: "2026-04-19T10:00:00.000Z",
         notification_due_at: "2036-04-17T10:00:00.000Z",
         retention_expiry: "2036-04-19T10:00:00.000Z",
@@ -1184,6 +1330,7 @@ describe("Control Plane API (Integration)", () => {
         legal_framework: request.legal_framework,
         actor_opaque_id: request.actor_opaque_id,
         applied_rule_name: "PMLA_FINANCIAL",
+        applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
         event_timestamp: "2036-04-17T10:00:00.000Z",
         sent_at: "2036-04-17T10:00:00.000Z",
       };
@@ -1214,6 +1361,7 @@ describe("Control Plane API (Integration)", () => {
         legal_framework: request.legal_framework,
         actor_opaque_id: request.actor_opaque_id,
         applied_rule_name: "PMLA_FINANCIAL",
+        applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
         event_timestamp: "2036-04-19T10:00:00.000Z",
         shredded_at: "2036-04-19T10:00:00.000Z",
       };
@@ -1306,6 +1454,7 @@ describe("Control Plane API (Integration)", () => {
         legal_framework: request.legal_framework,
         actor_opaque_id: request.actor_opaque_id,
         applied_rule_name: "PMLA_FINANCIAL",
+        applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
         event_timestamp: "2026-04-19T10:00:00.000Z",
         notification_due_at: "2036-04-17T10:00:00.000Z",
         retention_expiry: "2036-04-19T10:00:00.000Z",
@@ -1337,6 +1486,7 @@ describe("Control Plane API (Integration)", () => {
         legal_framework: request.legal_framework,
         actor_opaque_id: request.actor_opaque_id,
         applied_rule_name: "PMLA_FINANCIAL",
+        applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
         event_timestamp: "2036-04-17T10:00:00.000Z",
         sent_at: "2036-04-17T10:00:00.000Z",
       };
@@ -1367,6 +1517,7 @@ describe("Control Plane API (Integration)", () => {
         legal_framework: request.legal_framework,
         actor_opaque_id: request.actor_opaque_id,
         applied_rule_name: "PMLA_FINANCIAL",
+        applied_rule_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
         event_timestamp: "2036-04-19T10:00:00.000Z",
         shredded_at: "2036-04-19T10:00:00.000Z",
       };

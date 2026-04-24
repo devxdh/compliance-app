@@ -109,6 +109,12 @@ export const workerHeaderSchema = z
     authorization: z.string().regex(/^Bearer\s+\S+$/),
   });
 
+export const workerSyncHeaderSchema = workerHeaderSchema.extend({
+  "x-worker-config-hash": z.string().regex(/^[0-9a-fA-F]{64}$/),
+  "x-worker-config-version": z.string().min(1).optional(),
+  "x-worker-dpo-identifier": z.string().min(1).optional(),
+});
+
 export const requestIdParamSchema = z
   .object({
     requestId: z.uuid(),

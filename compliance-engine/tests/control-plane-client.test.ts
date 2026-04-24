@@ -39,6 +39,9 @@ describe("Control Plane API client", () => {
         "x-client-id": "worker-1",
         authorization: "Bearer worker-secret",
       },
+      workerConfigHash: "ab".repeat(32),
+      workerConfigVersion: "v-test",
+      workerDpoIdentifier: "dpo@example.com",
       pushOutboxEvent: async () => true,
     });
 
@@ -60,5 +63,15 @@ describe("Control Plane API client", () => {
         },
       },
     });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://control-plane.example/api/v1/worker/sync",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-worker-config-hash": "ab".repeat(32),
+          "x-worker-config-version": "v-test",
+          "x-worker-dpo-identifier": "dpo@example.com",
+        }),
+      })
+    );
   });
 });

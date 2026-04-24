@@ -30,6 +30,8 @@ export interface CreateAppOptions {
   taskMaxAttempts?: number;
   taskBaseBackoffMs?: number;
   webhookTimeoutMs?: number;
+  shadowBurnInRequired?: boolean;
+  shadowRequiredSuccesses?: number;
   adminApiToken: string;
   publicRateLimitWindowMs?: number;
   publicRateLimitMaxRequests?: number;
@@ -96,6 +98,8 @@ export function createApp(options: CreateAppOptions) {
     workerClientName: options.workerClientName ?? "worker-1",
     maxOutboxPayloadBytes: options.maxOutboxPayloadBytes ?? 32_768,
     webhookTimeoutMs: options.webhookTimeoutMs,
+    shadowBurnInRequired: options.shadowBurnInRequired,
+    shadowRequiredSuccesses: options.shadowRequiredSuccesses,
     now: options.now,
   });
   const adminService = new AdminService({

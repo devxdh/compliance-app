@@ -129,12 +129,12 @@ function accelerateNotificationPhase(requestId: string): void {
   psql(`
     UPDATE dpdp_control.erasure_jobs
     SET notification_due_at = NOW(),
-        shred_due_at = NOW() + INTERVAL '5 seconds'
+        shred_due_at = NOW() + INTERVAL '2 minutes'
     WHERE id = '${safeRequestId}';
 
     UPDATE dpdp_engine.pii_vault
     SET notification_due_at = NOW(),
-        retention_expiry = NOW() + INTERVAL '5 seconds'
+        retention_expiry = NOW() + INTERVAL '2 minutes'
     WHERE request_id = '${safeRequestId}';
   `);
 }

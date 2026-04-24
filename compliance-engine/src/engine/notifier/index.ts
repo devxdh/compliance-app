@@ -220,6 +220,7 @@ export async function dispatchPreErasureNotice(
           legal_framework: reservation.vault.legal_framework,
           actor_opaque_id: reservation.vault.actor_opaque_id,
           applied_rule_name: reservation.vault.applied_rule_name,
+          applied_rule_citation: reservation.vault.applied_rule_citation,
           event_timestamp: now.toISOString(),
           root_schema: appSchema,
           root_table: rootTable,

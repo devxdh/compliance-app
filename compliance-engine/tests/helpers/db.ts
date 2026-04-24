@@ -43,7 +43,7 @@ export async function createAppSchema(
   await sql`
     CREATE TABLE ${sql(schema)}.orders (
       id SERIAL PRIMARY KEY,
-      user_id INTEGER REFERENCES ${sql(schema)}.users(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES ${sql(schema)}.users(id),
       amount DECIMAL NOT NULL
     )
   `;
@@ -63,7 +63,7 @@ export async function createAppSchema(
   await sql`
     CREATE TABLE ${sql(schema)}.shipping_addresses (
       id SERIAL PRIMARY KEY,
-      order_id INTEGER REFERENCES ${sql(schema)}.orders(id) ON DELETE CASCADE,
+      order_id INTEGER REFERENCES ${sql(schema)}.orders(id),
       street TEXT NOT NULL,
       city TEXT NOT NULL
     )

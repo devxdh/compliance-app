@@ -11,14 +11,34 @@ export interface DependencyNode {
   table_name: string;
   column_name: string;
   parent_table: string;
+  delete_action: "NO_ACTION" | "RESTRICT" | "CASCADE" | "SET_NULL" | "SET_DEFAULT" | "UNKNOWN";
   depth: number;
 }
 
 export interface DependencyGraphOptions {
   maxDepth?: number;
+  failOnUnsafeDeleteAction?: boolean;
 }
 
 const DEFAULT_MAX_DEPTH = 32;
+const UNSAFE_DELETE_ACTIONS = new Set(["CASCADE", "SET_NULL", "SET_DEFAULT"]);
+
+function normalizeDeleteAction(value: string): DependencyNode["delete_action"] {
+  switch (value) {
+    case "a":
+      return "NO_ACTION";
+    case "r":
+      return "RESTRICT";
+    case "c":
+      return "CASCADE";
+    case "n":
+      return "SET_NULL";
+    case "d":
+      return "SET_DEFAULT";
+    default:
+      return "UNKNOWN";
+  }
+}
 
 function resolveMaxDepth(input?: number): number {
   if (input === undefined) {
@@ -41,15 +61,17 @@ function resolveMaxDepth(input?: number): number {
 /**
  * Discovers the transitive foreign-key dependency graph for a root table.
  *
- * The recursive CTE tracks visited OIDs to prevent cyclic loops and fails closed when the configured
- * depth limit is reached, avoiding partial graph mutation.
+ * The recursive CTE tracks visited OIDs to prevent cyclic loops, fails closed when the configured
+ * depth limit is reached, and rejects FK actions that would silently delete or rewrite dependent
+ * records outside the worker's explicit vault/redaction logic.
  *
  * @param sql - Postgres pool or active transaction.
  * @param schema - Root table schema.
  * @param rootTable - Root table name.
  * @param options - Optional traversal controls.
  * @returns Ordered dependency nodes containing table/column lineage metadata.
- * @throws {WorkerError} When root table is missing, depth is invalid, or depth limit is reached.
+ * @throws {WorkerError} When root table is missing, depth is invalid, unsafe FK actions are present,
+ * or the traversal depth limit is reached.
  */
 export async function getDependencyGraph(
   sql: postgres.Sql | postgres.TransactionSql,
@@ -79,7 +101,8 @@ export async function getDependencyGraph(
 
   const result = await sql<
     Array<
-      DependencyNode & {
+      Omit<DependencyNode, "delete_action"> & {
+        delete_action_code: string;
         table_oid: number;
         reached_limit: boolean;
       }
@@ -91,6 +114,7 @@ export async function getDependencyGraph(
         conrelid::regclass::text AS table_name,
         a.attname AS column_name,
         confrelid::regclass::text AS parent_table,
+        c.confdeltype::text AS delete_action_code,
         conrelid::oid AS table_oid,
         ARRAY[confrelid::oid, conrelid::oid] AS path,
         1 AS depth,
@@ -109,6 +133,7 @@ export async function getDependencyGraph(
         child.conrelid::regclass::text AS table_name,
         a.attname AS column_name,
         child.confrelid::regclass::text AS parent_table,
+        child.confdeltype::text AS delete_action_code,
         child.conrelid::oid AS table_oid,
         dt.path || child.conrelid::oid AS path,
         dt.depth + 1 AS depth,
@@ -128,12 +153,39 @@ export async function getDependencyGraph(
       table_name,
       column_name,
       parent_table,
+      delete_action_code,
       depth,
       table_oid,
       reached_limit
     FROM dependency_tree
     ORDER BY table_name, column_name, depth ASC
   `;
+
+  const graph = result.map(({ table_oid: _tableOid, reached_limit: _reachedLimit, delete_action_code, ...node }) => ({
+    ...node,
+    delete_action: normalizeDeleteAction(delete_action_code),
+  }));
+
+  if (options.failOnUnsafeDeleteAction !== false) {
+    const unsafe = graph.find((node) => UNSAFE_DELETE_ACTIONS.has(node.delete_action));
+    if (unsafe) {
+      fail({
+        code: "DPDP_GRAPH_UNSAFE_DELETE_ACTION",
+        title: "Unsafe foreign-key delete action detected",
+        detail: `Foreign key ${unsafe.table_name}.${unsafe.column_name} uses ON DELETE ${unsafe.delete_action}; the worker refuses to run because Postgres could mutate dependent data outside the explicit erasure plan.`,
+        category: "integrity",
+        retryable: false,
+        fatal: true,
+        context: {
+          schema: safeSchema,
+          rootTable: safeRootTable,
+          table: unsafe.table_name,
+          column: unsafe.column_name,
+          deleteAction: unsafe.delete_action,
+        },
+      });
+    }
+  }
 
   if (result.some((row) => row.depth >= maxDepth || row.reached_limit)) {
     fail({
@@ -147,5 +199,5 @@ export async function getDependencyGraph(
     });
   }
 
-  return result.map(({ table_oid: _tableOid, reached_limit: _reachedLimit, ...node }) => node);
+  return graph;
 }

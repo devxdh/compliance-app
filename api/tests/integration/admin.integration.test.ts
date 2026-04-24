@@ -33,6 +33,7 @@ describe("Control Plane Admin (Integration)", () => {
       adminApiToken: "admin-secret",
       workerClientName: "worker-1",
       maxOutboxPayloadBytes: 2048,
+      shadowBurnInRequired: false,
       now: () => now,
     });
 
@@ -50,6 +51,9 @@ describe("Control Plane Admin (Integration)", () => {
     return {
       "x-client-id": "worker-1",
       authorization: "Bearer worker-secret",
+      "x-worker-config-hash": "ab".repeat(32),
+      "x-worker-config-version": "v-test",
+      "x-worker-dpo-identifier": "dpo@example.com",
       "content-type": "application/json",
     };
   }
@@ -224,6 +228,7 @@ describe("Control Plane Admin (Integration)", () => {
       actor_opaque_id: "usr_usage_export",
       legal_framework: "DPDP_2023",
       applied_rule_name: "DEFAULT",
+      applied_rule_citation: "Configured default_retention_years policy",
       event_timestamp: "2026-04-20T10:00:00.000Z",
       notification_due_at: "2026-04-20T12:00:00.000Z",
       retention_expiry: "2026-04-21T10:00:00.000Z",
@@ -270,12 +275,17 @@ describe("Control Plane Admin (Integration)", () => {
     });
     expect(exportResponse.status).toBe(200);
     const lines = (await exportResponse.text()).trim().split("\n");
-    expect(lines).toHaveLength(1);
-    expect(JSON.parse(lines[0] ?? "{}")).toEqual(
-      expect.objectContaining({
-        worker_idempotency_key: "vault_usage_export",
-        event_type: "USER_VAULTED",
-      })
+    const parsed = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(parsed).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          worker_idempotency_key: "vault_usage_export",
+          event_type: "USER_VAULTED",
+        }),
+        expect.objectContaining({
+          event_type: "WORKER_CONFIG_HEARTBEAT",
+        }),
+      ])
     );
   });
 

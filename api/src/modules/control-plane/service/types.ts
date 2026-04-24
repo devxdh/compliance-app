@@ -11,6 +11,8 @@ export interface ServiceOptions {
   workerClientName: string;
   maxOutboxPayloadBytes: number;
   webhookTimeoutMs?: number;
+  shadowBurnInRequired?: boolean;
+  shadowRequiredSuccesses?: number;
   now?: () => Date;
 }
 
@@ -36,6 +38,8 @@ export interface TerminalCertificateEnvelope {
     event_type: TerminalEventType;
     method: TerminalCertificateMethod;
     legal_framework: string;
+    applied_rule_name: string | null;
+    applied_rule_citation: string | null;
     shredded_at: string;
     final_worm_hash: string;
   };
@@ -53,6 +57,14 @@ export interface TerminalCertificateEnvelope {
 export interface VaultLifecycleSchedule {
   notificationDueAt: Date;
   shredDueAt: Date;
+}
+
+/**
+ * Worker-computed legal rule metadata emitted with `USER_VAULTED`.
+ */
+export interface VaultLifecyclePolicy {
+  appliedRuleName: string;
+  appliedRuleCitation: string;
 }
 
 /**

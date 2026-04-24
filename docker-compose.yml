@@ -52,6 +52,8 @@ services:
       ADMIN_API_TOKEN: admin-secret
       PUBLIC_RATE_LIMIT_WINDOW_MS: 60000
       PUBLIC_RATE_LIMIT_MAX_REQUESTS: 120
+      SHADOW_BURN_IN_REQUIRED: "false"
+      SHADOW_REQUIRED_SUCCESSES: 100
     read_only: true
     tmpfs:
       - /tmp

@@ -25,9 +25,10 @@ export async function ensureClient(
       display_name,
       current_key_id,
       is_active,
+      shadow_required_successes,
       rotated_at
     )
-    VALUES (${name}, ${workerApiKeyHash}, ${name}, 'bootstrap', TRUE, NOW())
+    VALUES (${name}, ${workerApiKeyHash}, ${name}, 'bootstrap', TRUE, 100, NOW())
     ON CONFLICT (name) DO UPDATE
       SET worker_api_key_hash = EXCLUDED.worker_api_key_hash
     RETURNING *
@@ -165,4 +166,98 @@ export async function touchClientAuthentication(
     SET last_authenticated_at = ${now}
     WHERE id = ${clientId}
   `;
+}
+
+/**
+ * Records one successful shadow-mode vault and enables live mutation after the burn-in threshold.
+ *
+ * @param context - Repository SQL context.
+ * @param clientId - Worker client id.
+ * @param requiredSuccesses - Control-plane threshold before live mutations are accepted.
+ * @param now - State transition timestamp.
+ * @returns Updated client row or `null` when the client is missing.
+ */
+export async function recordShadowVaultSuccess(
+  context: RepositoryContext,
+  clientId: string,
+  requiredSuccesses: number,
+  now: Date
+): Promise<ClientRow | null> {
+  const [row] = await context.sql<ClientRow[]>`
+    UPDATE ${context.sql(context.schema)}.clients
+    SET shadow_success_count = shadow_success_count + 1,
+        shadow_required_successes = ${requiredSuccesses},
+        live_mutation_enabled = CASE
+          WHEN shadow_success_count + 1 >= ${requiredSuccesses} THEN TRUE
+          ELSE live_mutation_enabled
+        END,
+        live_mutation_enabled_at = CASE
+          WHEN live_mutation_enabled_at IS NULL
+           AND shadow_success_count + 1 >= ${requiredSuccesses}
+            THEN ${now}
+          ELSE live_mutation_enabled_at
+        END
+    WHERE id = ${clientId}
+    RETURNING *
+  `;
+  return row ?? null;
+}
+
+/**
+ * Idempotently records shadow burn-in for a completed task and increments the client once.
+ *
+ * The task marker prevents duplicate counts when a worker retries an acknowledgement after the
+ * Control Plane committed the first response but the network dropped the HTTP reply.
+ *
+ * @param context - Repository SQL context.
+ * @param taskId - Completed `VAULT_USER` task id.
+ * @param clientId - Worker client id.
+ * @param requiredSuccesses - Control-plane threshold before live mutations are accepted.
+ * @param now - State transition timestamp.
+ * @returns Updated client row, or `null` when this task was already counted.
+ */
+export async function recordShadowVaultSuccessForTask(
+  context: RepositoryContext,
+  taskId: string,
+  clientId: string,
+  requiredSuccesses: number,
+  now: Date
+): Promise<ClientRow | null> {
+  return context.sql.begin(async (tx) => {
+    const [marked] = await tx<{ id: string }[]>`
+      UPDATE ${tx(context.schema)}.task_queue
+      SET shadow_burn_in_recorded_at = ${now},
+          updated_at = ${now}
+      WHERE id = ${taskId}
+        AND client_id = ${clientId}
+        AND task_type = 'VAULT_USER'
+        AND status = 'COMPLETED'
+        AND shadow_burn_in_recorded_at IS NULL
+      RETURNING id
+    `;
+
+    if (!marked) {
+      return null;
+    }
+
+    const [row] = await tx<ClientRow[]>`
+      UPDATE ${tx(context.schema)}.clients
+      SET shadow_success_count = shadow_success_count + 1,
+          shadow_required_successes = ${requiredSuccesses},
+          live_mutation_enabled = CASE
+            WHEN shadow_success_count + 1 >= ${requiredSuccesses} THEN TRUE
+            ELSE live_mutation_enabled
+          END,
+          live_mutation_enabled_at = CASE
+            WHEN live_mutation_enabled_at IS NULL
+             AND shadow_success_count + 1 >= ${requiredSuccesses}
+              THEN ${now}
+            ELSE live_mutation_enabled_at
+          END
+      WHERE id = ${clientId}
+      RETURNING *
+    `;
+
+    return row ?? null;
+  });
 }

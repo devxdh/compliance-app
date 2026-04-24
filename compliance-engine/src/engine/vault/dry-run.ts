@@ -45,6 +45,7 @@ export async function runVaultDryRun(
   const retention = {
     retentionYears: context.defaultRetentionYears,
     appliedRuleName: "DEFAULT",
+    appliedRuleCitation: "Configured default_retention_years policy",
   };
   const { retentionExpiry, notificationDueAt } = await resolveRetentionWindow(
     sql,
@@ -71,6 +72,7 @@ export async function runVaultDryRun(
     dependencyCount,
     retentionYears: dependencyCount === 0 ? null : retention.retentionYears,
     appliedRuleName: dependencyCount === 0 ? null : retention.appliedRuleName,
+    appliedRuleCitation: dependencyCount === 0 ? null : retention.appliedRuleCitation,
     retentionExpiry: dependencyCount === 0 ? null : retentionExpiry.toISOString(),
     notificationDueAt: dependencyCount === 0 ? null : notificationDueAt.toISOString(),
     pseudonym: existingVault?.pseudonym ?? null,

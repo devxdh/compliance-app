@@ -43,11 +43,13 @@ describe("Retention Evaluation Engine", () => {
           retention_rules: [
             {
               rule_name: "RBI_KYC",
+              legal_citation: "RBI KYC Directions, 2016, Sec 38",
               if_has_data_in: ["kyc_documents"],
               retention_years: 5,
             },
             {
               rule_name: "PMLA_FINANCIAL",
+              legal_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
               if_has_data_in: ["transactions"],
               retention_years: 10,
             },
@@ -60,6 +62,7 @@ describe("Retention Evaluation Engine", () => {
     expect(result).toEqual({
       retentionYears: 10,
       appliedRuleName: "PMLA_FINANCIAL",
+      appliedRuleCitation: "Prevention of Money Laundering Act, 2002, Sec 12",
     });
   });
 
@@ -81,6 +84,7 @@ describe("Retention Evaluation Engine", () => {
           retention_rules: [
             {
               rule_name: "PMLA_FINANCIAL",
+              legal_citation: "Prevention of Money Laundering Act, 2002, Sec 12",
               if_has_data_in: ["transactions"],
               retention_years: 10,
             },
@@ -93,6 +97,7 @@ describe("Retention Evaluation Engine", () => {
     expect(result).toEqual({
       retentionYears: 1,
       appliedRuleName: "DEFAULT",
+      appliedRuleCitation: "Configured default_retention_years policy",
     });
   });
 });

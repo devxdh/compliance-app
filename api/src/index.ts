@@ -46,6 +46,8 @@ const app = createApp({
   taskMaxAttempts: env.TASK_MAX_ATTEMPTS,
   taskBaseBackoffMs: env.TASK_BASE_BACKOFF_MS,
   webhookTimeoutMs: env.WEBHOOK_TIMEOUT_MS,
+  shadowBurnInRequired: env.SHADOW_BURN_IN_REQUIRED,
+  shadowRequiredSuccesses: env.SHADOW_REQUIRED_SUCCESSES,
   adminApiToken: env.ADMIN_API_TOKEN,
   publicRateLimitWindowMs: env.PUBLIC_RATE_LIMIT_WINDOW_MS,
   publicRateLimitMaxRequests: env.PUBLIC_RATE_LIMIT_MAX_REQUESTS,

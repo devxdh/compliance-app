@@ -1,6 +1,22 @@
 import { z } from "zod";
 import { readSecretString } from "./secrets";
 
+const booleanEnv = z.preprocess((value) => {
+  if (typeof value !== "string") {
+    return value;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  return value;
+}, z.boolean());
+
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1).default("postgres://postgres:postgres@localhost:5432/postgres"),
   API_CONTROL_SCHEMA: z.string().min(1).default("dpdp_control"),
@@ -16,6 +32,8 @@ const envSchema = z.object({
   WORKER_CLIENT_NAME: z.string().min(1).default("worker-1"),
   MAX_OUTBOX_PAYLOAD_BYTES: z.coerce.number().int().positive().default(32768),
   WEBHOOK_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+  SHADOW_BURN_IN_REQUIRED: booleanEnv.default(true),
+  SHADOW_REQUIRED_SUCCESSES: z.coerce.number().int().min(0).default(100),
   ADMIN_API_TOKEN: z.string().min(1).default("admin-secret"),
   ADMIN_API_TOKEN_FILE: z.string().min(1).optional(),
   PUBLIC_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60000),

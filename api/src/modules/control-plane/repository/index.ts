@@ -3,6 +3,7 @@ import {
   getAuditEventByIdempotencyKey,
   getLatestAuditHash,
   insertAuditLedgerEvent,
+  insertWorkerConfigHeartbeat,
   listAuditLedgerEvents,
 } from "./audit";
 import {
@@ -14,6 +15,8 @@ import {
   ensureClient,
   getClientByName,
   listClients,
+  recordShadowVaultSuccess,
+  recordShadowVaultSuccessForTask,
   rotateClientKey,
   setClientActiveState,
   touchClientAuthentication,
@@ -47,6 +50,7 @@ import type {
   ErasureJobRow,
   InsertAuditLedgerEventInput,
   InsertCertificateInput,
+  InsertWorkerConfigHeartbeatInput,
   InsertUsageEventInput,
   RepositoryContext,
   RotateClientKeyInput,
@@ -162,6 +166,40 @@ export class ControlPlaneRepository {
    */
   async touchClientAuthentication(clientId: string, now: Date): Promise<void> {
     return touchClientAuthentication(this.context, clientId, now);
+  }
+
+  /**
+   * Records a successful shadow-mode vault and enables live mutation after threshold.
+   *
+   * @param clientId - Worker client id.
+   * @param requiredSuccesses - Required successful shadow vault count.
+   * @param now - State transition timestamp.
+   * @returns Updated client row or `null`.
+   */
+  async recordShadowVaultSuccess(
+    clientId: string,
+    requiredSuccesses: number,
+    now: Date
+  ): Promise<ClientRow | null> {
+    return recordShadowVaultSuccess(this.context, clientId, requiredSuccesses, now);
+  }
+
+  /**
+   * Idempotently records a completed shadow task and increments client burn-in once.
+   *
+   * @param taskId - Completed `VAULT_USER` task id.
+   * @param clientId - Worker client id.
+   * @param requiredSuccesses - Required successful shadow vault count.
+   * @param now - State transition timestamp.
+   * @returns Updated client row, or `null` when this task was already counted.
+   */
+  async recordShadowVaultSuccessForTask(
+    taskId: string,
+    clientId: string,
+    requiredSuccesses: number,
+    now: Date
+  ): Promise<ClientRow | null> {
+    return recordShadowVaultSuccessForTask(this.context, taskId, clientId, requiredSuccesses, now);
   }
 
   /**
@@ -290,6 +328,16 @@ export class ControlPlaneRepository {
    */
   async insertAuditLedgerEvent(input: InsertAuditLedgerEventInput): Promise<boolean> {
     return insertAuditLedgerEvent(this.context, input);
+  }
+
+  /**
+   * Persists an idempotent worker-config heartbeat marker in the audit ledger.
+   *
+   * @param input - Worker config fingerprint metadata.
+   * @returns `true` when inserted, `false` when already recorded.
+   */
+  async insertWorkerConfigHeartbeat(input: InsertWorkerConfigHeartbeatInput): Promise<boolean> {
+    return insertWorkerConfigHeartbeat(this.context, input);
   }
 
   /**

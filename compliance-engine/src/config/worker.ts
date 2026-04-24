@@ -1,12 +1,9 @@
 import { readFileSync } from "node:fs";
 import yaml from "js-yaml";
 import { z } from "zod";
-import { readRuntimeSecret } from "./secrets";
 import { assertIdentifier } from "../db/identifiers";
-import { asWorkerError, fail } from "../errors";
-import { base64ToBytes, hexToBytes } from "../utils/encoding";
-
-const KEY_LENGTH = 32;
+import { asWorkerError } from "../errors";
+import { keySourceSchema, resolveConfiguredKey, resolveConfiguredKeySync } from "./kms";
 
 const mutationRuleSchema = z.enum(["HMAC", "STATIC_MASK", "NULLIFY"]);
 
@@ -97,6 +94,7 @@ export type SatelliteTarget = z.infer<typeof satelliteTargetSchema>;
 const retentionRuleSchema = z
   .object({
     rule_name: z.string().min(1),
+    legal_citation: z.string().min(1),
     if_has_data_in: z.array(z.string().min(1)),
     retention_years: z.number().int().min(0),
   })
@@ -125,6 +123,17 @@ const retentionRuleSchema = z
   });
 
 export type RetentionRule = z.infer<typeof retentionRuleSchema>;
+
+const legalAttestationSchema = z
+  .object({
+    dpo_identifier: z.string().min(1),
+    configuration_version: z.string().min(1),
+    legal_review_date: z.iso.date(),
+    acknowledgment: z.string().min(1),
+  })
+  .strict();
+
+export type LegalAttestation = z.infer<typeof legalAttestationSchema>;
 
 const workerYamlSchema = z
   .object({
@@ -165,8 +174,10 @@ const workerYamlSchema = z
     security: z
       .object({
         notification_lease_seconds: z.number().int().min(1).default(120),
-        master_key_env: z.string().min(1),
-        hmac_key_env: z.string().min(1),
+        master_key_env: z.string().min(1).default("DPDP_MASTER_KEY"),
+        hmac_key_env: z.string().min(1).default("DPDP_HMAC_KEY"),
+        master_key_source: keySourceSchema.optional(),
+        hmac_key_source: keySourceSchema.optional(),
       })
       .strict(),
     integrity: z
@@ -174,6 +185,7 @@ const workerYamlSchema = z
         expected_schema_hash: z.string().regex(/^[0-9a-fA-F]{64}$/),
       })
       .strict(),
+    legal_attestation: legalAttestationSchema,
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -249,47 +261,6 @@ export interface WorkerConfig extends WorkerYamlConfig {
   hmacKey: Uint8Array;
 }
 
-function decodeKey(rawValue: string, envName: string): Uint8Array {
-  const value = rawValue.trim();
-  if (value.length === 0) {
-    fail({
-      code: "DPDP_SECRET_ENV_MISSING",
-      title: "Required secret is missing",
-      detail: `${envName} is required.`,
-      category: "configuration",
-      retryable: false,
-      fatal: true,
-      context: { envName },
-    });
-  }
-
-  const normalizedHex = value.startsWith("hex:") ? value.slice(4) : value;
-  if (/^[0-9a-fA-F]+$/.test(normalizedHex) && normalizedHex.length === KEY_LENGTH * 2) {
-    return hexToBytes(normalizedHex);
-  }
-
-  const normalizedBase64 = value.startsWith("base64:") ? value.slice(7) : value;
-  let decoded: Uint8Array;
-  try {
-    decoded = base64ToBytes(normalizedBase64);
-  } catch {
-    decoded = new Uint8Array(0);
-  }
-  if (decoded.length === KEY_LENGTH) {
-    return decoded;
-  }
-
-  fail({
-    code: "DPDP_SECRET_ENV_INVALID",
-    title: "Invalid secret format",
-    detail: `${envName} must decode to exactly ${KEY_LENGTH} bytes. Supported formats: 64-char hex or base64.`,
-    category: "configuration",
-    retryable: false,
-    fatal: true,
-    context: { envName },
-  });
-}
-
 function normalizeWorkerYaml(config: WorkerYamlConfig): WorkerYamlConfig {
   return {
     ...config,
@@ -333,26 +304,23 @@ function normalizeWorkerYaml(config: WorkerYamlConfig): WorkerYamlConfig {
       ...config.compliance_policy,
       retention_rules: config.compliance_policy.retention_rules.map((rule) => ({
         ...rule,
+        legal_citation: rule.legal_citation.trim(),
         if_has_data_in: rule.if_has_data_in.map((table) =>
           assertIdentifier(table, "retention rule evidence table")
         ),
       })),
     },
+    legal_attestation: {
+      ...config.legal_attestation,
+      dpo_identifier: config.legal_attestation.dpo_identifier.trim(),
+      configuration_version: config.legal_attestation.configuration_version.trim(),
+      legal_review_date: config.legal_attestation.legal_review_date,
+      acknowledgment: config.legal_attestation.acknowledgment.trim(),
+    },
   };
 }
 
-/**
- * Reads `compliance.worker.yml`, validates it strictly, and resolves runtime cryptographic secrets.
- *
- * @param env - Environment map used to resolve key material.
- * @param configPath - Worker YAML path.
- * @returns Fully validated worker configuration with decoded binary keys.
- * @throws {WorkerError} When YAML parsing, schema validation, or secret decoding fails.
- */
-export function readWorkerConfig(
-  env: Record<string, string | undefined> = process.env,
-  configPath: string | URL = new URL("../../compliance.worker.yml", import.meta.url)
-): WorkerConfig {
+function readAndValidateWorkerYaml(configPath: string | URL): WorkerYamlConfig {
   const yamlText = readFileSync(configPath, "utf8");
   let parsedYaml: unknown;
   try {
@@ -383,14 +351,75 @@ export function readWorkerConfig(
     });
   }
 
-  const masterKey = decodeKey(
-    readRuntimeSecret(env, parsedConfig.security.master_key_env),
-    parsedConfig.security.master_key_env
-  );
-  const hmacKeyEnvValue =
-    readRuntimeSecret(env, parsedConfig.security.hmac_key_env) ||
-    readRuntimeSecret(env, parsedConfig.security.master_key_env);
-  const hmacKey = decodeKey(hmacKeyEnvValue, parsedConfig.security.hmac_key_env);
+  return parsedConfig;
+}
+
+/**
+ * Reads `compliance.worker.yml`, validates it strictly, and resolves local cryptographic secrets.
+ *
+ * This synchronous path is intended for tests and local env/file sources. Production boot should
+ * use `readWorkerConfigFromRuntime` so remote KMS/Vault providers can be resolved without blocking
+ * or silently falling back to process env.
+ *
+ * @param env - Environment map used to resolve key material.
+ * @param configPath - Worker YAML path.
+ * @returns Fully validated worker configuration with decoded binary keys.
+ * @throws {WorkerError} When YAML parsing, schema validation, or local secret decoding fails.
+ */
+export function readWorkerConfig(
+  env: Record<string, string | undefined> = process.env,
+  configPath: string | URL = new URL("../../compliance.worker.yml", import.meta.url)
+): WorkerConfig {
+  const parsedConfig = readAndValidateWorkerYaml(configPath);
+  const masterKey = resolveConfiguredKeySync({
+    env,
+    keyName: parsedConfig.security.master_key_env,
+    legacyEnvName: parsedConfig.security.master_key_env,
+    source: parsedConfig.security.master_key_source,
+  });
+  const hmacKey = resolveConfiguredKeySync({
+    env,
+    keyName: parsedConfig.security.hmac_key_env,
+    legacyEnvName: parsedConfig.security.hmac_key_env,
+    fallbackLegacyEnvName: parsedConfig.security.master_key_env,
+    source: parsedConfig.security.hmac_key_source,
+  });
+
+  return {
+    ...parsedConfig,
+    masterKey,
+    hmacKey,
+  };
+}
+
+/**
+ * Reads `compliance.worker.yml` and resolves env, file, AWS KMS, GCP Secret Manager, or Vault keys.
+ *
+ * @param env - Environment map used for provider credentials and legacy env key fallback.
+ * @param configPath - Worker YAML path.
+ * @returns Fully validated worker configuration with runtime-resolved binary keys.
+ * @throws {WorkerError} When YAML, schema validation, provider access, or key decoding fails.
+ */
+export async function readWorkerConfigFromRuntime(
+  env: Record<string, string | undefined> = process.env,
+  configPath: string | URL = new URL("../../compliance.worker.yml", import.meta.url)
+): Promise<WorkerConfig> {
+  const parsedConfig = readAndValidateWorkerYaml(configPath);
+  const [masterKey, hmacKey] = await Promise.all([
+    resolveConfiguredKey({
+      env,
+      keyName: parsedConfig.security.master_key_env,
+      legacyEnvName: parsedConfig.security.master_key_env,
+      source: parsedConfig.security.master_key_source,
+    }),
+    resolveConfiguredKey({
+      env,
+      keyName: parsedConfig.security.hmac_key_env,
+      legacyEnvName: parsedConfig.security.hmac_key_env,
+      fallbackLegacyEnvName: parsedConfig.security.master_key_env,
+      source: parsedConfig.security.hmac_key_source,
+    }),
+  ]);
 
   return {
     ...parsedConfig,

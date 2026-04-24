@@ -42,6 +42,22 @@ spec:
               value: /mnt/secrets-store/coe-private-key
             - name: COE_PUBLIC_KEY_SPKI_BASE64_FILE
               value: /mnt/secrets-store/coe-public-key
+            - name: WEBHOOK_TIMEOUT_MS
+              value: "10000"
+            - name: SHADOW_BURN_IN_REQUIRED
+              value: "true"
+            - name: SHADOW_REQUIRED_SUCCESSES
+              value: "100"
+            - name: PUBLIC_RATE_LIMIT_WINDOW_MS
+              value: "60000"
+            - name: PUBLIC_RATE_LIMIT_MAX_REQUESTS
+              value: "60"
+            - name: TASK_MAX_ATTEMPTS
+              value: "10"
+            - name: TASK_BASE_BACKOFF_MS
+              value: "1000"
+            - name: WORKER_TASK_LEASE_SECONDS
+              value: "60"
           readinessProbe:
             httpGet:
               path: /ready

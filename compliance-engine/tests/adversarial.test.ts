@@ -81,6 +81,7 @@ compliance_policy:
   notice_window_hours: 48
   retention_rules:
     - rule_name: RBI_KYC
+      legal_citation: "RBI KYC Directions, 2016, Sec 38"
       if_has_data_in:
         - kyc_documents
       retention_years: 5
@@ -107,6 +108,11 @@ security:
   hmac_key_env: DPDP_HMAC_KEY
 integrity:
   expected_schema_hash: "${"1".repeat(64)}"
+legal_attestation:
+  dpo_identifier: "dpo-name@client.com"
+  configuration_version: "v1.2.0"
+  legal_review_date: "2026-04-20"
+  acknowledgment: "I confirm this configuration accurately reflects our obligations."
 `);
     configPathsToDelete.push(nullRetentionPath);
 
@@ -130,6 +136,7 @@ compliance_policy:
   notice_window_hours: 48
   retention_rules:
     - rule_name: RBI_KYC
+      legal_citation: "RBI KYC Directions, 2016, Sec 38"
       if_has_data_in:
         - kyc_documents
       retention_years: 5
@@ -156,6 +163,11 @@ security:
   hmac_key_env: DPDP_HMAC_KEY
 integrity:
   expected_schema_hash: "${"1".repeat(64)}"
+legal_attestation:
+  dpo_identifier: "dpo-name@client.com"
+  configuration_version: "v1.2.0"
+  legal_review_date: "2026-04-20"
+  acknowledgment: "I confirm this configuration accurately reflects our obligations."
 `);
     configPathsToDelete.push(injectionPath);
 

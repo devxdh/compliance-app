@@ -4,6 +4,7 @@ import type { ErasureJobRow } from "../repository";
 import type { CreateErasureRequestInput, WorkerOutboxEventInput } from "../schemas";
 import type {
   AllowedOutboxPredecessorStatus,
+  VaultLifecyclePolicy,
   VaultLifecycleSchedule,
 } from "./types";
 
@@ -95,6 +96,44 @@ export function parseVaultLifecycleSchedule(payload: Record<string, unknown>): V
 }
 
 /**
+ * Extracts legal rule metadata emitted by `USER_VAULTED`.
+ *
+ * @param payload - Nested worker payload persisted in the outbox event.
+ * @returns Parsed rule-name and citation pair.
+ * @throws {ApiError} When metadata is missing or malformed.
+ */
+export function parseVaultLifecyclePolicy(payload: Record<string, unknown>): VaultLifecyclePolicy {
+  const appliedRuleName =
+    typeof payload.applied_rule_name === "string"
+      ? payload.applied_rule_name
+      : typeof payload.appliedRuleName === "string"
+        ? payload.appliedRuleName
+        : null;
+  const appliedRuleCitation =
+    typeof payload.applied_rule_citation === "string"
+      ? payload.applied_rule_citation
+      : typeof payload.appliedRuleCitation === "string"
+        ? payload.appliedRuleCitation
+        : null;
+
+  if (!appliedRuleName || !appliedRuleCitation) {
+    fail({
+      code: "API_OUTBOX_VAULT_POLICY_MISSING",
+      title: "Vault policy metadata missing",
+      detail: "USER_VAULTED payload must include applied_rule_name and applied_rule_citation.",
+      status: 400,
+      category: "validation",
+      retryable: false,
+    });
+  }
+
+  return {
+    appliedRuleName,
+    appliedRuleCitation,
+  };
+}
+
+/**
  * Verifies that worker-supplied outbox metadata still matches the immutable request contract.
  *
  * @param job - Persisted erasure job created during ingestion.
@@ -114,6 +153,8 @@ export function assertOutboxMetadata(job: ErasureJobRow, input: WorkerOutboxEven
     typeof input.payload.legal_framework === "string" ? input.payload.legal_framework : null;
   const appliedRuleName =
     typeof input.payload.applied_rule_name === "string" ? input.payload.applied_rule_name : null;
+  const appliedRuleCitation =
+    typeof input.payload.applied_rule_citation === "string" ? input.payload.applied_rule_citation : null;
 
   if (nestedRequestId !== input.request_id || nestedSubjectOpaqueId !== input.subject_opaque_id) {
     fail({
@@ -137,12 +178,12 @@ export function assertOutboxMetadata(job: ErasureJobRow, input: WorkerOutboxEven
     });
   }
 
-  if (!triggerSource || !actorOpaqueId || !legalFramework || !appliedRuleName) {
+  if (!triggerSource || !actorOpaqueId || !legalFramework || !appliedRuleName || !appliedRuleCitation) {
     fail({
       code: "API_OUTBOX_METADATA_MISSING",
       title: "Outbox legal metadata missing",
       detail:
-        "Worker outbox events must include trigger_source, actor_opaque_id, legal_framework, and applied_rule_name.",
+        "Worker outbox events must include trigger_source, actor_opaque_id, legal_framework, applied_rule_name, and applied_rule_citation.",
       status: 400,
       category: "validation",
       retryable: false,
@@ -158,6 +199,21 @@ export function assertOutboxMetadata(job: ErasureJobRow, input: WorkerOutboxEven
       code: "API_OUTBOX_METADATA_CONFLICT",
       title: "Outbox legal metadata conflict",
       detail: "Worker outbox metadata does not match the immutable erasure request contract.",
+      status: 409,
+      category: "integrity",
+      retryable: false,
+    });
+  }
+
+  if (
+    job.applied_rule_name &&
+    job.applied_rule_citation &&
+    (appliedRuleName !== job.applied_rule_name || appliedRuleCitation !== job.applied_rule_citation)
+  ) {
+    fail({
+      code: "API_OUTBOX_POLICY_METADATA_CONFLICT",
+      title: "Outbox policy metadata conflict",
+      detail: "Worker policy metadata does not match the persisted vault policy for this request.",
       status: 409,
       category: "integrity",
       retryable: false,

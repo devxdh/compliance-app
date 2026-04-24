@@ -16,6 +16,10 @@ export interface ClientRow {
   worker_api_key_hash: string;
   current_key_id: string;
   is_active: boolean;
+  shadow_success_count: number;
+  shadow_required_successes: number;
+  live_mutation_enabled: boolean;
+  live_mutation_enabled_at: Date | null;
   rotated_at: Date;
   last_authenticated_at: Date | null;
   created_at: Date;
@@ -32,6 +36,8 @@ export interface ErasureJobRow {
   trigger_source: ErasureTriggerSource;
   actor_opaque_id: string;
   legal_framework: string;
+  applied_rule_name: string | null;
+  applied_rule_citation: string | null;
   request_timestamp: Date;
   tenant_id: string | null;
   cooldown_days: number;
@@ -60,6 +66,7 @@ export interface TaskQueueRow {
   leased_at: Date | null;
   lease_expires_at: Date | null;
   completed_at: Date | null;
+  shadow_burn_in_recorded_at: Date | null;
   attempt_count: number;
   next_attempt_at: Date;
   dead_lettered_at: Date | null;
@@ -199,10 +206,21 @@ export interface CreateJobAndQueueTaskInput {
 export interface InsertAuditLedgerEventInput {
   clientId: string;
   idempotencyKey: string;
-  eventType: OutboxEventType;
+  eventType: OutboxEventType | "WORKER_CONFIG_HEARTBEAT";
   payload: unknown;
   previousHash: string;
   currentHash: string;
+  now: Date;
+}
+
+/**
+ * Input required to append a worker-config heartbeat marker to the audit ledger.
+ */
+export interface InsertWorkerConfigHeartbeatInput {
+  clientId: string;
+  configHash: string;
+  configVersion?: string;
+  dpoIdentifier?: string;
   now: Date;
 }
 
@@ -246,6 +264,8 @@ export interface TransitionJobFromOutboxInput {
   notificationDueAt?: Date;
   shredDueAt?: Date;
   shreddedAt?: Date;
+  appliedRuleName?: string;
+  appliedRuleCitation?: string;
 }
 
 /**

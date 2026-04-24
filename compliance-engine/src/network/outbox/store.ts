@@ -32,7 +32,14 @@ export async function claimOutboxBatch(
       WHERE status IN ('pending', 'leased')
         AND next_attempt_at <= ${now}
         AND (status = 'pending' OR lease_expires_at IS NULL OR lease_expires_at <= ${now})
-      ORDER BY created_at ASC
+      ORDER BY
+        CASE
+          WHEN event_type = 'SHRED_SUCCESS' THEN 0
+          WHEN event_type = 'USER_HARD_DELETED' THEN 1
+          WHEN event_type = 'NOTIFICATION_SENT' THEN 2
+          ELSE 3
+        END ASC,
+        created_at ASC
       LIMIT ${batchSize}
       FOR UPDATE SKIP LOCKED
     `;

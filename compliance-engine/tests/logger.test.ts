@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DestinationStream } from "pino";
 import { createWorkerLogger } from "../src/observability/logger";
+import { redactSqlDebugParameters } from "../src/db/sql-debug";
 
 describe("Pino worker logger", () => {
   it("redacts sensitive fields before they leave the process", async () => {
@@ -38,5 +39,23 @@ describe("Pino worker logger", () => {
       full_name: "[REDACTED]",
     });
     expect(logRecord.encrypted_pii).toBe("[REDACTED]");
+  });
+
+  it("redacts postgres.js debug parameters when SQL references configured PII columns", () => {
+    expect(
+      redactSqlDebugParameters(
+        "UPDATE tenant.users SET email = $1 WHERE id = $2",
+        ["alice@example.com", "usr_123"],
+        ["email", "full_name"]
+      )
+    ).toEqual(["[REDACTED]", "[REDACTED]"]);
+
+    expect(
+      redactSqlDebugParameters(
+        "SELECT id FROM tenant.orders WHERE user_id = $1",
+        ["usr_123"],
+        ["email", "full_name"]
+      )
+    ).toEqual(["usr_123"]);
   });
 });

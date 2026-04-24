@@ -20,7 +20,7 @@ This document serves as the absolute blueprint for the engine. It meticulously d
 * **Role:** The Investigator and The Executioner.
 * **Stack:** Bun, Web Crypto API (`globalThis.crypto`), `postgres.js`.
 * **Liability Shield - Egress-Only Network:** The API never pushes into the client's network. The Worker polls via `GET /sync` using a bounded 5-second short-poll loop. This eliminates the need for the client to open inbound firewall ports while avoiding the operational overhead of held HTTP long-polls or pub/sub infrastructure.
-* **Liability Shield - Key Isolation:** The 256-bit AES Master Key (`KEK`) is injected strictly into the Worker's environment variables by the client's own infrastructure (e.g., AWS KMS). The Control Plane never possesses the key to decrypt the vault.
+* **Liability Shield - Key Isolation:** The 256-bit AES Master Key (`KEK`) is resolved only inside the client's Worker runtime. Local deployments may use env/file injection, while production can resolve AWS KMS `Decrypt`, Google Secret Manager `versions.access`, or HashiCorp Vault KV v2 through native Web Crypto/fetch adapters. The Control Plane never possesses the key to decrypt the vault.
 
 ---
 
@@ -34,6 +34,7 @@ The client must explicitly declare all targets. If any required field is omitted
 
 * **Schema Drift Detection:** At boot, the Worker hashes the `information_schema.columns` of the target database. If the database schema has mutated but the YAML has not been updated, the Worker halts. *Protection:* Prevents partial vaulting of undocumented databases.
 * **Satellite Targets:** Unlinked tables containing PII (e.g., `marketing_leads`) must be manually mapped by the client with specific actions (`redact` or `hard_delete`).
+* **Referential Integrity Guardrail:** Graph traversal rejects `ON DELETE CASCADE`, `ON DELETE SET NULL`, and `ON DELETE SET DEFAULT` dependencies beneath the root table. Those constraints can silently mutate rows outside the explicit vaulting plan, so the worker fails closed and requires schema remediation.
 
 ---
 
@@ -129,6 +130,7 @@ Compliance execution requires clinical transactional integrity. Failures in data
 ### 2.1 Isolation Level and Anomaly Prevention
 * **Mechanism:** All vaulting occurs within `BEGIN ISOLATION LEVEL REPEATABLE READ`. 
 * **Proof:** `REPEATABLE READ` prevents Non-Repeatable Reads. However, it does not prevent Serialization Anomalies. To protect against TOCTOU (Time-of-Check to Time-of-Use), the Worker executes `SELECT ... FOR UPDATE` on the root entity immediately. This acquires an exclusive row-level lock. If a concurrent transaction attempts to insert a foreign-key dependency pointing to the locked root row, it is blocked or triggers a serialization failure, guaranteeing the $O(V+E)$ graph traversal calculates an immutable snapshot.
+* **Schema Guardrail:** The same graph pass inspects `pg_constraint.confdeltype`; unsafe FK delete actions trigger a fatal configuration/integrity error rather than allowing Postgres to cascade or null dependent data without WORM evidence.
 
 ### 2.2 Deadlock Mitigation & Starvation
 * **Strategic Avoidance:** Monolithic `UPDATE` statements on high-volume unlinked satellite tables (e.g., 50M rows in `audit_logs`) cause table-level lock escalation and connection starvation.

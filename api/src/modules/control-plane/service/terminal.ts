@@ -45,6 +45,8 @@ function buildTerminalCertificatePayload(
     event_type: eventType,
     method: resolveCertificateMethod(eventType),
     legal_framework: job.legal_framework,
+    applied_rule_name: job.applied_rule_name,
+    applied_rule_citation: job.applied_rule_citation,
     shredded_at: shreddedAt.toISOString(),
     final_worm_hash: finalWormHash,
   };
@@ -58,16 +60,20 @@ async function dispatchTerminalWebhook(
     request_id: string;
     subject_opaque_id: string;
     event_type: TerminalEventType;
-    legal_framework: string;
-    shredded_at: string;
-    certificate: {
+      legal_framework: string;
+      applied_rule_name: string | null;
+      applied_rule_citation: string | null;
+      shredded_at: string;
+      certificate: {
       request_id: string;
       subject_opaque_id: string;
       event_type: TerminalEventType;
-      method: string;
-      legal_framework: string;
-      shredded_at: string;
-      final_worm_hash: string;
+        method: string;
+        legal_framework: string;
+        applied_rule_name: string | null;
+        applied_rule_citation: string | null;
+        shredded_at: string;
+        final_worm_hash: string;
       signature: {
         algorithm: string;
         key_id: string;
@@ -283,6 +289,8 @@ export async function finalizeTerminalOutboxEvent(
       subject_opaque_id: job.subject_opaque_id,
       event_type: eventType,
       legal_framework: job.legal_framework,
+      applied_rule_name: certificate.payload.applied_rule_name,
+      applied_rule_citation: certificate.payload.applied_rule_citation,
       shredded_at: shreddedAt.toISOString(),
       certificate: {
         request_id: job.id,
@@ -290,6 +298,8 @@ export async function finalizeTerminalOutboxEvent(
         event_type: eventType,
         method: certificate.payload.method,
         legal_framework: job.legal_framework,
+        applied_rule_name: certificate.payload.applied_rule_name,
+        applied_rule_citation: certificate.payload.applied_rule_citation,
         shredded_at: shreddedAt.toISOString(),
         final_worm_hash: certificate.payload.final_worm_hash,
         signature: {
