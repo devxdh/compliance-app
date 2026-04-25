@@ -189,27 +189,24 @@ export function decodeKeyMaterial(rawValue: string | Uint8Array, keyName: string
 }
 
 async function sha256Hex(value: string): Promise<string> {
-  return bytesToHex(
-    new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", copyBytes(textEncoder.encode(value))))
-  );
+  const bytes = textEncoder.encode(value);
+  // Ensure we pass a regular ArrayBuffer, as SharedArrayBuffer is not allowed for crypto.
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer);
+  return bytesToHex(new Uint8Array(digest));
 }
 
 async function hmacSha256(key: Uint8Array, value: string | Uint8Array): Promise<Uint8Array> {
-  const keyBytes = copyBytes(key);
-  const data = typeof value === "string" ? copyBytes(textEncoder.encode(value)) : copyBytes(value);
-  try {
-    const cryptoKey = await globalThis.crypto.subtle.importKey(
-      "raw",
-      keyBytes,
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    );
-    return new Uint8Array(await globalThis.crypto.subtle.sign("HMAC", cryptoKey, data));
-  } finally {
-    keyBytes.fill(0);
-    data.fill(0);
-  }
+  const keyBytes = key.slice();
+  const cryptoKey = await globalThis.crypto.subtle.importKey(
+    "raw",
+    keyBytes.buffer as ArrayBuffer,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const data = typeof value === "string" ? textEncoder.encode(value).slice() : value.slice();
+  const signature = await globalThis.crypto.subtle.sign("HMAC", cryptoKey, data.buffer as ArrayBuffer);
+  return new Uint8Array(signature);
 }
 
 async function signAwsKmsRequest(

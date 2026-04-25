@@ -47,8 +47,8 @@ export function createControlPlaneRouter(service: ControlPlaneService) {
 
   async function authorizeWorker(headers: { "x-client-id": string; authorization: string }) {
     const token = headers.authorization.replace(/^Bearer\s+/i, "");
-    const clientId = await service.authorizeWorker(headers["x-client-id"], token);
-    if (!clientId) {
+    const authenticatedClientId = await service.authorizeWorker(headers["x-client-id"], token);
+    if (!authenticatedClientId) {
       fail({
         code: "API_WORKER_AUTH_INVALID",
         title: "Invalid worker credentials",
@@ -59,7 +59,7 @@ export function createControlPlaneRouter(service: ControlPlaneService) {
       });
     }
 
-    return clientId;
+    return authenticatedClientId;
   }
 
   router.post(
@@ -182,6 +182,33 @@ export function createControlPlaneRouter(service: ControlPlaneService) {
       200
     );
   });
+
+  router.get(
+    "/certificates/:requestId/download",
+    zValidator("param", requestIdParamSchema, validationHook("param")),
+    async (c) => {
+      const params = c.req.valid("param");
+      const pdf = await service.getCertificatePdf(params.requestId);
+      if (!pdf) {
+        fail({
+          code: "API_CERTIFICATE_NOT_FOUND",
+          title: "Certificate not found",
+          detail: `Certificate ${params.requestId} does not exist.`,
+          status: 404,
+          category: "validation",
+          retryable: false,
+        });
+      }
+
+      return new Response(pdf, {
+        status: 200,
+        headers: {
+          "content-type": "application/pdf",
+          "content-disposition": `attachment; filename="certificate-${params.requestId}.pdf"`,
+        },
+      });
+    }
+  );
 
   return router;
 }

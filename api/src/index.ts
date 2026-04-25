@@ -28,10 +28,12 @@ const bootstrapRepository = new ControlPlaneRepository(
   env.TASK_BASE_BACKOFF_MS
 );
 
-await bootstrapRepository.ensureClient(
+const bootstrapClient = await bootstrapRepository.ensureClient(
   env.WORKER_CLIENT_NAME,
   await computeTokenHash(env.WORKER_SHARED_SECRET)
 );
+
+console.info(`[BOOTSTRAP] Ensured worker client: ${bootstrapClient.name} (${bootstrapClient.id})`);
 
 const app = createApp({
   sql,

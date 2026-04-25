@@ -48,12 +48,19 @@ describe("Control Plane API (Integration)", () => {
       now: overrides.now,
     });
 
-    return { app, controlSchema };
+    const bootstrapClient = await sql<any[]>`
+      INSERT INTO ${sql(controlSchema)}.clients (name, worker_api_key_hash)
+      VALUES ('worker-1', '6fb46f7a92742970166379ed5195e79c4493a7cc5664280c039cfd4095ba5faf')
+      RETURNING id
+    `;
+    const workerId = bootstrapClient[0]!.id;
+
+    return { app, controlSchema, workerId };
   }
 
-  function buildWorkerAuthHeaders(token: string = "worker-secret") {
+  function buildWorkerAuthHeaders(workerId: string, token: string = "worker-secret") {
     return {
-      "x-client-id": "worker-1",
+      "x-client-id": workerId,
       authorization: `Bearer ${token}`,
       "x-worker-config-hash": "ab".repeat(32),
       "x-worker-config-version": "v-test",
@@ -80,7 +87,7 @@ describe("Control Plane API (Integration)", () => {
   }
 
   it("rejects undeclared PII fields, direct identifiers, and missing mandatory actor metadata", async () => {
-    const { app } = await setup();
+    const { app, controlSchema, workerId } = await setup();
 
     const extraFieldResponse = await app.request("/api/v1/erasure-requests", {
       method: "POST",
@@ -179,7 +186,7 @@ describe("Control Plane API (Integration)", () => {
   });
 
   it("applies secure response headers and normalizes untrusted request ids", async () => {
-    const { app } = await setup();
+    const { app, controlSchema, workerId } = await setup();
 
     const response = await app.request("/health", {
       headers: {
@@ -196,7 +203,7 @@ describe("Control Plane API (Integration)", () => {
   });
 
   it("rejects webhook targets that violate Control Plane SSRF guardrails", async () => {
-    const { app } = await setup();
+    const { app, controlSchema, workerId } = await setup();
 
     const insecureProtocol = await app.request("/api/v1/erasure-requests", {
       method: "POST",
@@ -233,7 +240,7 @@ describe("Control Plane API (Integration)", () => {
   });
 
   it("reuses the same cooldown timer on idempotent create replay", async () => {
-    const { app, controlSchema } = await setup();
+    const { app, controlSchema, workerId } = await setup();
     const request = buildErasureRequest({
       subject_opaque_id: "usr_idempotent",
       cooldown_days: 30,
@@ -279,7 +286,7 @@ describe("Control Plane API (Integration)", () => {
   });
 
   it("sync dispatches only due jobs and ignores cancelled or future cooldown work", async () => {
-    const { app, controlSchema } = await setup();
+    const { app, controlSchema, workerId } = await setup();
     const futureJob = buildErasureRequest({ subject_opaque_id: "usr_future", cooldown_days: 30 });
     const cancelledJob = buildErasureRequest({ subject_opaque_id: "usr_cancel", cooldown_days: 30 });
     const dueJob = buildErasureRequest({ subject_opaque_id: "usr_due", cooldown_days: 0, tenant_id: "tenant_a" });
@@ -311,7 +318,7 @@ describe("Control Plane API (Integration)", () => {
 
     const syncResponse = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(syncResponse.status).toBe(200);
     const syncPayload = (await syncResponse.json()) as {
@@ -337,7 +344,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         status: "completed",
@@ -347,7 +354,7 @@ describe("Control Plane API (Integration)", () => {
 
     const secondSync = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(secondSync.status).toBe(200);
     expect(await secondSync.json()).toEqual({ pending: false });
@@ -391,7 +398,7 @@ describe("Control Plane API (Integration)", () => {
   });
 
   it("cancel endpoint prevents a waiting erasure request from syncing", async () => {
-    const { app } = await setup();
+    const { app, controlSchema, workerId } = await setup();
     const request = buildErasureRequest({ subject_opaque_id: "usr_abort", cooldown_days: 30 });
 
     const createResponse = await app.request("/api/v1/erasure-requests", {
@@ -408,14 +415,14 @@ describe("Control Plane API (Integration)", () => {
 
     const syncResponse = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(syncResponse.status).toBe(200);
     expect(await syncResponse.json()).toEqual({ pending: false });
   });
 
   it("enforces shadow-mode burn-in before accepting live mutation requests", async () => {
-    const { app, controlSchema } = await setup({
+    const { app, controlSchema, workerId } = await setup({
       shadowBurnInRequired: true,
       shadowRequiredSuccesses: 2,
     });
@@ -455,7 +462,7 @@ describe("Control Plane API (Integration)", () => {
 
       const syncResponse = await app.request("/api/v1/worker/sync", {
         method: "GET",
-        headers: buildWorkerAuthHeaders(),
+        headers: buildWorkerAuthHeaders(workerId),
       });
       expect(syncResponse.status).toBe(200);
       const syncPayload = (await syncResponse.json()) as { pending: boolean; task?: { id: string } };
@@ -466,7 +473,7 @@ describe("Control Plane API (Integration)", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...buildWorkerAuthHeaders(),
+          ...buildWorkerAuthHeaders(workerId),
         },
         body: JSON.stringify({
           status: "completed",
@@ -482,7 +489,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         status: "completed",
@@ -527,7 +534,7 @@ describe("Control Plane API (Integration)", () => {
 
   it("requeues retryable task failures with exponential backoff before redispatch", async () => {
     let now = new Date("2026-04-19T10:00:00.000Z");
-    const { app, controlSchema } = await setup({
+    const { app, controlSchema, workerId } = await setup({
       now: () => now,
       taskMaxAttempts: 3,
       taskBaseBackoffMs: 1000,
@@ -543,7 +550,7 @@ describe("Control Plane API (Integration)", () => {
 
     const syncResponse = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(syncResponse.status).toBe(200);
 
@@ -551,7 +558,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         status: "failed",
@@ -591,7 +598,7 @@ describe("Control Plane API (Integration)", () => {
 
     const beforeDueSync = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(beforeDueSync.status).toBe(200);
     expect(await beforeDueSync.json()).toEqual({ pending: false });
@@ -599,7 +606,7 @@ describe("Control Plane API (Integration)", () => {
     now = new Date("2026-04-19T10:00:01.000Z");
     const afterDueSync = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(afterDueSync.status).toBe(200);
     expect(await afterDueSync.json()).toEqual(
@@ -613,7 +620,7 @@ describe("Control Plane API (Integration)", () => {
   });
 
   it("dead-letters non-retryable task failures and marks the job as failed", async () => {
-    const { app, controlSchema } = await setup({
+    const { app, controlSchema, workerId } = await setup({
       now: () => new Date("2026-04-19T10:00:00.000Z"),
       taskMaxAttempts: 3,
       taskBaseBackoffMs: 1000,
@@ -629,14 +636,14 @@ describe("Control Plane API (Integration)", () => {
 
     await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
 
     const ackResponse = await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         status: "failed",
@@ -685,7 +692,7 @@ describe("Control Plane API (Integration)", () => {
   });
 
   it("ingests a chained USER_VAULTED event and transitions the job to VAULTED", async () => {
-    const { app, controlSchema } = await setup();
+    const { app, controlSchema, workerId } = await setup();
     const request = buildErasureRequest({ subject_opaque_id: "usr_worm", cooldown_days: 0 });
     const createResponse = await app.request("/api/v1/erasure-requests", {
       method: "POST",
@@ -696,7 +703,7 @@ describe("Control Plane API (Integration)", () => {
 
     const leaseResponse = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(leaseResponse.status).toBe(200);
 
@@ -704,7 +711,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         status: "completed",
@@ -734,7 +741,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         idempotency_key: idempotencyKey,
@@ -765,7 +772,7 @@ describe("Control Plane API (Integration)", () => {
 
   it("materializes a NOTIFY_USER task after USER_VAULTED reaches notification_due_at", async () => {
     const now = new Date("2036-04-17T10:00:00.000Z");
-    const { app, controlSchema } = await setup({ now: () => now });
+    const { app, controlSchema, workerId } = await setup({ now: () => now });
     const request = buildErasureRequest({ subject_opaque_id: "usr_notice_due", cooldown_days: 0 });
 
     const createResponse = await app.request("/api/v1/erasure-requests", {
@@ -777,7 +784,7 @@ describe("Control Plane API (Integration)", () => {
 
     const leaseResponse = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(leaseResponse.status).toBe(200);
 
@@ -785,7 +792,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         status: "completed",
@@ -813,7 +820,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         idempotency_key: idempotencyKey,
@@ -830,7 +837,7 @@ describe("Control Plane API (Integration)", () => {
 
     const syncResponse = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(syncResponse.status).toBe(200);
     expect(await syncResponse.json()).toEqual(
@@ -858,7 +865,7 @@ describe("Control Plane API (Integration)", () => {
 
   it("materializes a SHRED_USER task after NOTIFICATION_SENT reaches retention expiry", async () => {
     const now = new Date("2036-04-19T10:00:00.000Z");
-    const { app, controlSchema } = await setup({ now: () => now });
+    const { app, controlSchema, workerId } = await setup({ now: () => now });
     const request = buildErasureRequest({ subject_opaque_id: "usr_shred_due", cooldown_days: 0 });
 
     const createResponse = await app.request("/api/v1/erasure-requests", {
@@ -870,7 +877,7 @@ describe("Control Plane API (Integration)", () => {
 
     const leaseResponse = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(leaseResponse.status).toBe(200);
 
@@ -878,7 +885,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         status: "completed",
@@ -903,7 +910,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         idempotency_key: `vault:${created.request_id}`,
@@ -933,7 +940,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         idempotency_key: `notice:${created.request_id}`,
@@ -950,7 +957,7 @@ describe("Control Plane API (Integration)", () => {
 
     const syncResponse = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(syncResponse.status).toBe(200);
     expect(await syncResponse.json()).toEqual(
@@ -977,7 +984,7 @@ describe("Control Plane API (Integration)", () => {
   });
 
   it("ingests SHRED_SUCCESS and mints a certificate of erasure", async () => {
-    const { app, controlSchema } = await setup();
+    const { app, controlSchema, workerId } = await setup();
     const request = buildErasureRequest({ subject_opaque_id: "usr_cert", cooldown_days: 0 });
     const createResponse = await app.request("/api/v1/erasure-requests", {
       method: "POST",
@@ -988,7 +995,7 @@ describe("Control Plane API (Integration)", () => {
 
     const leaseResponse = await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
     expect(leaseResponse.status).toBe(200);
 
@@ -996,7 +1003,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         status: "completed",
@@ -1018,11 +1025,11 @@ describe("Control Plane API (Integration)", () => {
     };
     const vaultIdempotencyKey = `vault:${created.request_id}`;
     const vaultHash = await computeCurrentHash("GENESIS", vaultPayload, vaultIdempotencyKey);
-    await app.request("/api/v1/worker/outbox", {
+    const vaultResponse = await app.request("/api/v1/worker/outbox", {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         idempotency_key: vaultIdempotencyKey,
@@ -1035,6 +1042,7 @@ describe("Control Plane API (Integration)", () => {
         event_timestamp: "2026-04-19T10:00:00.000Z",
       }),
     });
+    expect(vaultResponse.status).toBe(202);
 
     const noticePayload = {
       request_id: created.request_id,
@@ -1052,7 +1060,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         idempotency_key: `notice:${created.request_id}`,
@@ -1084,7 +1092,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         idempotency_key: shredIdempotencyKey,
@@ -1135,10 +1143,16 @@ describe("Control Plane API (Integration)", () => {
         storedCertificate!.payload
       )
     ).toBe(true);
+
+    const pdfResponse = await app.request(`/api/v1/certificates/${created.request_id}/download`);
+    expect(pdfResponse.status).toBe(200);
+    expect(pdfResponse.headers.get("content-type")).toBe("application/pdf");
+    const pdfBuffer = await pdfResponse.arrayBuffer();
+    expect(pdfBuffer.byteLength).toBeGreaterThan(1000);
   });
 
   it("rejects out-of-order worker terminal events before the notice stage", async () => {
-    const { app } = await setup();
+    const { app, controlSchema, workerId } = await setup();
     const request = buildErasureRequest({
       subject_opaque_id: "usr_out_of_order",
       cooldown_days: 0,
@@ -1168,7 +1182,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         idempotency_key: shredIdempotencyKey,
@@ -1186,7 +1200,7 @@ describe("Control Plane API (Integration)", () => {
   });
 
   it("rejects worker outbox metadata that diverges from the original legal contract", async () => {
-    const { app } = await setup();
+    const { app, controlSchema, workerId } = await setup();
     const request = buildErasureRequest({
       subject_opaque_id: "usr_metadata_conflict",
       cooldown_days: 0,
@@ -1200,14 +1214,14 @@ describe("Control Plane API (Integration)", () => {
 
     await app.request("/api/v1/worker/sync", {
       method: "GET",
-      headers: buildWorkerAuthHeaders(),
+      headers: buildWorkerAuthHeaders(workerId),
     });
 
     await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         status: "completed",
@@ -1234,7 +1248,7 @@ describe("Control Plane API (Integration)", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...buildWorkerAuthHeaders(),
+        ...buildWorkerAuthHeaders(workerId),
       },
       body: JSON.stringify({
         idempotency_key: vaultIdempotencyKey,
@@ -1259,7 +1273,7 @@ describe("Control Plane API (Integration)", () => {
       })
     );
     try {
-      const { app } = await setup();
+      const { app, controlSchema, workerId } = await setup();
       const webhookUrl = "https://client.example.com/hooks/dpdp";
       const request = buildErasureRequest({
         subject_opaque_id: "usr_webhook",
@@ -1275,7 +1289,7 @@ describe("Control Plane API (Integration)", () => {
 
       const leaseResponse = await app.request("/api/v1/worker/sync", {
         method: "GET",
-        headers: buildWorkerAuthHeaders(),
+        headers: buildWorkerAuthHeaders(workerId),
       });
       expect(leaseResponse.status).toBe(200);
 
@@ -1283,7 +1297,7 @@ describe("Control Plane API (Integration)", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...buildWorkerAuthHeaders(),
+          ...buildWorkerAuthHeaders(workerId),
         },
         body: JSON.stringify({
           status: "completed",
@@ -1308,7 +1322,7 @@ describe("Control Plane API (Integration)", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...buildWorkerAuthHeaders(),
+          ...buildWorkerAuthHeaders(workerId),
         },
         body: JSON.stringify({
           idempotency_key: `vault:${created.request_id}`,
@@ -1339,7 +1353,7 @@ describe("Control Plane API (Integration)", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...buildWorkerAuthHeaders(),
+          ...buildWorkerAuthHeaders(workerId),
         },
         body: JSON.stringify({
           idempotency_key: `notice:${created.request_id}`,
@@ -1372,7 +1386,7 @@ describe("Control Plane API (Integration)", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...buildWorkerAuthHeaders(),
+          ...buildWorkerAuthHeaders(workerId),
         },
         body: JSON.stringify({
           idempotency_key: shredIdempotencyKey,
@@ -1416,7 +1430,7 @@ describe("Control Plane API (Integration)", () => {
       );
 
     try {
-      const { app } = await setup();
+      const { app, controlSchema, workerId } = await setup();
       const request = buildErasureRequest({
         subject_opaque_id: "usr_webhook_replay",
         cooldown_days: 0,
@@ -1431,7 +1445,7 @@ describe("Control Plane API (Integration)", () => {
 
       const leaseResponse = await app.request("/api/v1/worker/sync", {
         method: "GET",
-        headers: buildWorkerAuthHeaders(),
+        headers: buildWorkerAuthHeaders(workerId),
       });
       expect(leaseResponse.status).toBe(200);
 
@@ -1439,7 +1453,7 @@ describe("Control Plane API (Integration)", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...buildWorkerAuthHeaders(),
+          ...buildWorkerAuthHeaders(workerId),
         },
         body: JSON.stringify({
           status: "completed",
@@ -1464,7 +1478,7 @@ describe("Control Plane API (Integration)", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...buildWorkerAuthHeaders(),
+          ...buildWorkerAuthHeaders(workerId),
         },
         body: JSON.stringify({
           idempotency_key: `vault:${created.request_id}`,
@@ -1495,7 +1509,7 @@ describe("Control Plane API (Integration)", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...buildWorkerAuthHeaders(),
+          ...buildWorkerAuthHeaders(workerId),
         },
         body: JSON.stringify({
           idempotency_key: `notice:${created.request_id}`,
@@ -1536,7 +1550,7 @@ describe("Control Plane API (Integration)", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...buildWorkerAuthHeaders(),
+          ...buildWorkerAuthHeaders(workerId),
         },
         body: JSON.stringify(shredEvent),
       });
@@ -1546,7 +1560,7 @@ describe("Control Plane API (Integration)", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...buildWorkerAuthHeaders(),
+          ...buildWorkerAuthHeaders(workerId),
         },
         body: JSON.stringify(shredEvent),
       });

@@ -105,7 +105,7 @@ export const workerOutboxEventSchema = z
 
 export const workerHeaderSchema = z
   .object({
-    "x-client-id": z.string().min(1),
+    "x-client-id": z.uuid(),
     authorization: z.string().regex(/^Bearer\s+\S+$/),
   });
 

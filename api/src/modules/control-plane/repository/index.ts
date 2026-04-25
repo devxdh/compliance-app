@@ -13,6 +13,7 @@ import {
 import {
   createClient,
   ensureClient,
+  getClientById,
   getClientByName,
   listClients,
   recordShadowVaultSuccess,
@@ -106,6 +107,16 @@ export class ControlPlaneRepository {
    */
   async ensureClient(name: string, workerApiKeyHash: string): Promise<ClientRow> {
     return ensureClient(this.context, name, workerApiKeyHash);
+  }
+
+  /**
+   * Finds a registered worker client by ID.
+   *
+   * @param id - Worker client UUID.
+   * @returns Matching client row or `null`.
+   */
+  async getClientById(id: string): Promise<ClientRow | null> {
+    return getClientById(this.context, id);
   }
 
   /**

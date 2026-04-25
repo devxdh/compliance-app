@@ -23,6 +23,7 @@ import { finalizeTerminalOutboxEvent, isTerminalEventType } from "./terminal";
 import type { ServiceOptions } from "./types";
 import { assertSafeWebhookUrl } from "../webhook";
 import { recordUsageEvent, recordWorkerOutboxEvent } from "../../../observability/metrics";
+import { PdfCertificateGenerator, type ProofOfErasureData } from "./pdf-generator";
 
 /**
  * Domain service for zero-PII control-plane orchestration.
@@ -31,6 +32,7 @@ export class ControlPlaneService {
   private readonly now: () => Date;
   private readonly repository: ControlPlaneRepository;
   private readonly signer: ServiceOptions["signer"];
+  private readonly pdfGenerator = new PdfCertificateGenerator();
   private readonly workerSharedSecret: string;
   private readonly workerClientName: string;
   private readonly maxOutboxPayloadBytes: number;
@@ -210,17 +212,17 @@ export class ControlPlaneService {
   }
 
   /**
-   * Authenticates a worker using client name plus bearer-token hash matching.
+   * Authenticates a worker using client ID plus bearer-token hash matching.
    *
-   * @param clientName - Worker client name from the request header.
+   * @param clientId - Worker client UUID from the request header.
    * @param bearerToken - Raw bearer token.
    * @returns Worker client id when credentials match, otherwise `null`.
    */
   async authorizeWorker(
-    clientName: string,
+    clientId: string,
     bearerToken: string
   ): Promise<string | null> {
-    const client = await this.repository.getClientByName(clientName);
+    const client = await this.repository.getClientById(clientId);
     if (!client || !client.is_active) {
       return null;
     }
@@ -561,5 +563,50 @@ export class ControlPlaneService {
    */
   async getCertificate(requestId: string) {
     return this.repository.getCertificateByRequestId(requestId);
+  }
+
+  /**
+   * Generates a signed PDF artifact for a completed erasure request.
+   *
+   * @param requestId - Erasure request UUID.
+   * @returns PDF buffer or `null` when certificate is not yet minted.
+   */
+  async getCertificatePdf(requestId: string): Promise<Uint8Array | null> {
+    const cert = await this.repository.getCertificateByRequestId(requestId);
+    if (!cert) {
+      return null;
+    }
+
+    const payload = cert.payload as Record<string, unknown>;
+    const blobReceipts = (payload.blob_receipts as any[]) ?? [];
+    
+    let blobSummary: ProofOfErasureData["blobSummary"] | undefined;
+    if (blobReceipts.length > 0) {
+      blobSummary = {
+        totalObjects: blobReceipts.length,
+        totalVersionsPurged: blobReceipts.reduce((sum, r) => sum + (r.versionCount ?? 0), 0),
+        provider: blobReceipts[0]?.provider === "aws_s3" ? "Amazon S3" : blobReceipts[0]?.provider ?? "External Object Storage",
+      };
+    }
+
+    const proof: ProofOfErasureData = {
+      requestId: cert.request_id,
+      subjectOpaqueId: cert.subject_opaque_id,
+      method: cert.method,
+      legalFramework: cert.legal_framework,
+      appliedRuleName: (payload.applied_rule_name as string) ?? null,
+      appliedRuleCitation: (payload.applied_rule_citation as string) ?? null,
+      shreddedAt: cert.shredded_at.toISOString(),
+      finalWormHash: (payload.final_worm_hash as string) ?? null,
+      blobSummary,
+      signature: {
+        algorithm: cert.algorithm,
+        keyId: cert.key_id,
+        signatureBase64: cert.signature_base64,
+        publicKeySpkiBase64: cert.public_key_spki_base64,
+      },
+    };
+
+    return this.pdfGenerator.generate(proof);
   }
 }

@@ -11,6 +11,7 @@
   "dependencies": {
     "@hono/zod-validator": "^0.7.5",
     "hono": "^4.12.14",
+    "pdf-lib": "^1.17.1",
     "pino": "^10.3.1",
     "postgres": "^3.4.9",
     "prom-client": "^15.1.3",

@@ -86,14 +86,9 @@ function appendExpectedBucketOwner(headers: Headers, expectedBucketOwner?: strin
   }
 }
 
-function copyBytes(bytes: Uint8Array): Uint8Array {
-  const copy = new Uint8Array(bytes.length);
-  copy.set(bytes);
-  return copy;
-}
-
 async function sha256Base64(bytes: Uint8Array): Promise<string> {
-  return bytesToBase64(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", copyBytes(bytes))));
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer);
+  return bytesToBase64(new Uint8Array(digest));
 }
 
 function decodeXml(value: string): string {
@@ -449,7 +444,7 @@ export function createS3Client(options: S3ClientOptions = {}): S3Client {
         "content-type": input.contentType,
         "content-length": String(input.body.length),
         "x-amz-checksum-sha256": bytesToBase64(
-          new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", copyBytes(input.body)))
+          new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", input.body.slice().buffer as ArrayBuffer))
         ),
       });
       appendExpectedBucketOwner(headers, input.expectedBucketOwner);

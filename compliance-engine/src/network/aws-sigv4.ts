@@ -35,26 +35,23 @@ function encodeBody(body: Uint8Array | string | undefined): Uint8Array {
 }
 
 async function sha256Hex(input: Uint8Array | string): Promise<string> {
-  const bytes = typeof input === "string" ? copyBytes(textEncoder.encode(input)) : copyBytes(input);
-  return bytesToHex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes)));
+  const bytes = typeof input === "string" ? textEncoder.encode(input) : input;
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes.slice().buffer as ArrayBuffer);
+  return bytesToHex(new Uint8Array(digest));
 }
 
 async function hmacSha256(key: Uint8Array, value: string): Promise<Uint8Array> {
-  const keyCopy = copyBytes(key);
-  try {
-    const cryptoKey = await globalThis.crypto.subtle.importKey(
-      "raw",
-      keyCopy,
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["sign"]
-    );
-    return new Uint8Array(
-      await globalThis.crypto.subtle.sign("HMAC", cryptoKey, copyBytes(textEncoder.encode(value)))
-    );
-  } finally {
-    keyCopy.fill(0);
-  }
+  const keyBytes = key.slice();
+  const cryptoKey = await globalThis.crypto.subtle.importKey(
+    "raw",
+    keyBytes.buffer as ArrayBuffer,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const data = textEncoder.encode(value).slice();
+  const signature = await globalThis.crypto.subtle.sign("HMAC", cryptoKey, data.buffer as ArrayBuffer);
+  return new Uint8Array(signature);
 }
 
 function buildCanonicalQuery(searchParams: URLSearchParams): string {

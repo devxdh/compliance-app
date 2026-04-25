@@ -37,6 +37,25 @@ export async function ensureClient(
 }
 
 /**
+ * Finds a registered worker client by its unique ID.
+ *
+ * @param context - Repository SQL context.
+ * @param id - Worker client UUID.
+ * @returns Matching client row or `null`.
+ */
+export async function getClientById(
+  context: RepositoryContext,
+  id: string
+): Promise<ClientRow | null> {
+  const [row] = await context.sql<ClientRow[]>`
+    SELECT *
+    FROM ${context.sql(context.schema)}.clients
+    WHERE id = ${id}
+  `;
+  return row ?? null;
+}
+
+/**
  * Finds a registered worker client by name.
  *
  * @param context - Repository SQL context.

@@ -37,7 +37,14 @@ describe("Control Plane Admin (Integration)", () => {
       now: () => now,
     });
 
-    return { app, controlSchema };
+    const bootstrapClient = await sql<any[]>`
+      INSERT INTO ${sql(controlSchema)}.clients (name, worker_api_key_hash)
+      VALUES ('worker-1', '6fb46f7a92742970166379ed5195e79c4493a7cc5664280c039cfd4095ba5faf')
+      RETURNING id
+    `;
+    const workerId = bootstrapClient[0]!.id;
+
+    return { app, controlSchema, workerId };
   }
 
   function adminHeaders() {
@@ -47,9 +54,9 @@ describe("Control Plane Admin (Integration)", () => {
     };
   }
 
-  function workerHeaders() {
+  function workerHeaders(workerId: string) {
     return {
-      "x-client-id": "worker-1",
+      "x-client-id": workerId,
       authorization: "Bearer worker-secret",
       "x-worker-config-hash": "ab".repeat(32),
       "x-worker-config-version": "v-test",
@@ -73,7 +80,7 @@ describe("Control Plane Admin (Integration)", () => {
   }
 
   it("creates, lists, rotates, and deactivates worker clients", async () => {
-    const { app } = await setup();
+    const { app, workerId } = await setup();
 
     const createResponse = await app.request("/api/v1/admin/clients", {
       method: "POST",
@@ -131,7 +138,7 @@ describe("Control Plane Admin (Integration)", () => {
   });
 
   it("lists and requeues dead-letter tasks", async () => {
-    const { app } = await setup();
+    const { app, workerId } = await setup();
     const request = buildErasureRequest();
     const createResponse = await app.request("/api/v1/erasure-requests", {
       method: "POST",
@@ -141,11 +148,11 @@ describe("Control Plane Admin (Integration)", () => {
     const created = (await createResponse.json()) as { task_id: string };
 
     await app.request("/api/v1/worker/sync", {
-      headers: workerHeaders(),
+      headers: workerHeaders(workerId),
     });
     await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
       method: "POST",
-      headers: workerHeaders(),
+      headers: workerHeaders(workerId),
       body: JSON.stringify({
         status: "failed",
         result: {
@@ -192,7 +199,7 @@ describe("Control Plane Admin (Integration)", () => {
   });
 
   it("summarizes usage and exports audit ledger entries", async () => {
-    const { app } = await setup();
+    const { app, workerId } = await setup();
     const request = buildErasureRequest({
       subject_opaque_id: "usr_usage_export",
       actor_opaque_id: "usr_usage_export",
@@ -205,13 +212,13 @@ describe("Control Plane Admin (Integration)", () => {
     const created = (await createResponse.json()) as { request_id: string; task_id: string };
 
     const leaseResponse = await app.request("/api/v1/worker/sync", {
-      headers: workerHeaders(),
+      headers: workerHeaders(workerId),
     });
     expect(leaseResponse.status).toBe(200);
 
     const ackResponse = await app.request(`/api/v1/worker/tasks/${created.task_id}/ack`, {
       method: "POST",
-      headers: workerHeaders(),
+      headers: workerHeaders(workerId),
       body: JSON.stringify({
         status: "completed",
         result: {
@@ -237,7 +244,7 @@ describe("Control Plane Admin (Integration)", () => {
 
     const outboxResponse = await app.request("/api/v1/worker/outbox", {
       method: "POST",
-      headers: workerHeaders(),
+      headers: workerHeaders(workerId),
       body: JSON.stringify({
         idempotency_key: "vault_usage_export",
         request_id: created.request_id,
@@ -290,7 +297,7 @@ describe("Control Plane Admin (Integration)", () => {
   });
 
   it("exposes prometheus metrics for request accounting", async () => {
-    const { app } = await setup();
+    const { app, workerId } = await setup();
 
     await app.request("/health");
     const metricsResponse = await app.request("/metrics");
