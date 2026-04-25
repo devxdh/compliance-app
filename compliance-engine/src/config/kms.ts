@@ -8,6 +8,12 @@ const KEY_LENGTH = 32;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+function copyBytes(bytes: Uint8Array): Uint8Array {
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  return copy as Uint8Array;
+}
+
 const awsKmsSourceSchema = z
   .object({
     provider: z.literal("aws_kms"),
@@ -183,21 +189,27 @@ export function decodeKeyMaterial(rawValue: string | Uint8Array, keyName: string
 }
 
 async function sha256Hex(value: string): Promise<string> {
-  return bytesToHex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", textEncoder.encode(value))));
+  return bytesToHex(
+    new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", copyBytes(textEncoder.encode(value))))
+  );
 }
 
 async function hmacSha256(key: Uint8Array, value: string | Uint8Array): Promise<Uint8Array> {
-  const keyBytes: Uint8Array<ArrayBuffer> = new Uint8Array(key);
-  const cryptoKey = await globalThis.crypto.subtle.importKey(
-    "raw",
-    keyBytes,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const data: Uint8Array<ArrayBuffer> =
-    typeof value === "string" ? textEncoder.encode(value) : new Uint8Array(value);
-  return new Uint8Array(await globalThis.crypto.subtle.sign("HMAC", cryptoKey, data));
+  const keyBytes = copyBytes(key);
+  const data = typeof value === "string" ? copyBytes(textEncoder.encode(value)) : copyBytes(value);
+  try {
+    const cryptoKey = await globalThis.crypto.subtle.importKey(
+      "raw",
+      keyBytes,
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    return new Uint8Array(await globalThis.crypto.subtle.sign("HMAC", cryptoKey, data));
+  } finally {
+    keyBytes.fill(0);
+    data.fill(0);
+  }
 }
 
 async function signAwsKmsRequest(
@@ -243,7 +255,7 @@ async function signAwsKmsRequest(
     await sha256Hex(canonicalRequest),
   ].join("\n");
 
-  const secretSeed = textEncoder.encode(`AWS4${credentials.secretAccessKey}`);
+  const secretSeed = copyBytes(textEncoder.encode(`AWS4${credentials.secretAccessKey}`));
   let dateKey: Uint8Array = new Uint8Array(0);
   let regionKey: Uint8Array = new Uint8Array(0);
   let serviceKey: Uint8Array = new Uint8Array(0);

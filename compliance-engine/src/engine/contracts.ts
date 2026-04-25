@@ -1,5 +1,6 @@
 import type postgres from "postgres";
-import type { RetentionRule, RootPiiColumns, SatelliteTarget } from "../config/worker";
+import type { BlobTarget, RetentionRule, RootPiiColumns, SatelliteTarget } from "../config/worker";
+import type { S3Client } from "../network/s3-client";
 
 /**
  * Cryptographic material required by worker mutation pipelines.
@@ -47,6 +48,7 @@ export interface VaultUserOptions extends WorkerSchemas, WorkerTimingOptions {
   rootIdColumn?: string;
   rootPiiColumns?: RootPiiColumns;
   satelliteTargets?: SatelliteTarget[];
+  blobTargets?: BlobTarget[];
   retentionRules?: readonly RetentionRule[];
   tenantId?: string;
   requestId?: string;
@@ -57,6 +59,7 @@ export interface VaultUserOptions extends WorkerSchemas, WorkerTimingOptions {
   requestTimestamp?: string;
   shadowMode?: boolean;
   sqlReplica?: postgres.Sql;
+  s3Client?: S3Client;
 }
 
 /**
@@ -76,6 +79,8 @@ export interface DispatchNoticeOptions extends WorkerSchemas, WorkerTimingOption
 export interface ShredUserOptions extends WorkerSchemas, WorkerTimingOptions {
   rootTable?: string;
   requireNotification?: boolean;
+  hmacKey?: Uint8Array;
+  s3Client?: S3Client;
 }
 
 /**
@@ -104,6 +109,7 @@ export interface VaultUserResult extends WorkerOperationResult {
   notificationDueAt: string | null;
   pseudonym: string | null;
   outboxEventType: string | null;
+  blobProtectionCount?: number;
   plan?: DryRunPlan;
 }
 
@@ -126,5 +132,6 @@ export interface ShredUserResult extends WorkerOperationResult {
   action: "shredded" | "already_shredded" | "dry_run";
   shreddedAt: string | null;
   outboxEventType: string | null;
+  blobReceiptCount?: number;
   plan?: DryRunPlan;
 }

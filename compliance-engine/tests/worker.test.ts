@@ -73,6 +73,7 @@ describe("Compliance Worker Daemon (E2E Lifecycle)", () => {
           },
         },
         satellite_targets: [],
+        blob_targets: [],
         outbox: {
           batch_size: 10,
           lease_seconds: 60,

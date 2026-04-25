@@ -43,8 +43,13 @@ database:
   engine_schema: "dpdp_engine" # Default provisioning schema
 
 compliance_policy:
-  retention_years: null        # REQUIRED: e.g., 5
+  default_retention_years: null # REQUIRED: e.g., 0
   notice_window_hours: null    # REQUIRED: e.g., 48
+  retention_rules:
+    - rule_name: "PMLA_FINANCIAL"
+      legal_citation: "Prevention of Money Laundering Act, 2002, Sec 12"
+      if_has_data_in: ["transactions", "invoices"]
+      retention_years: 10
 
 graph:
   root_table: "users"
@@ -66,6 +71,17 @@ satellite_targets:             # REQUIRED: Explicit unlinked tables
   - table: "system_audit_logs"
     lookup_column: "user_identifier"
     action: "hard_delete"
+
+blob_targets:                  # REQUIRED when PII can live in object storage
+  - table: "users"
+    column: "kyc_document_url"
+    provider: "aws_s3"
+    region: "ap-south-1"
+    action: "versioned_hard_delete"
+    retention_mode: "governance"
+    expected_bucket_owner: "123456789012"
+    require_version_id: true
+    masking_blob_path: "./assets/erased_placeholder.pdf" # only for action: overwrite
 
 outbox:
   batch_size: 10
@@ -92,6 +108,7 @@ Code generation must map exactly to these structures.
 * `pii_vault`: `(user_uuid_hash TEXT PK, root_schema TEXT, root_table TEXT, root_id TEXT, pseudonym TEXT, encrypted_pii JSONB, salt TEXT, dependency_count INT, retention_expiry TIMESTAMPTZ)`
 * `user_keys`: `(user_uuid_hash TEXT PK REFERENCES pii_vault ON DELETE CASCADE, encrypted_dek TEXT)`
 * `outbox`: `(id UUID PK, idempotency_key TEXT UNIQUE, user_uuid_hash TEXT, event_type TEXT, payload JSONB, previous_hash TEXT, current_hash TEXT)`
+* `blob_objects`: `(id UUID PK, user_uuid_hash TEXT, provider TEXT, bucket TEXT, object_key TEXT, version_id TEXT, action TEXT, retention_mode TEXT, expected_bucket_owner TEXT NULL, legal_hold_status TEXT, shred_status TEXT, receipt JSONB)`
 
 ---
 
@@ -140,7 +157,15 @@ All vaulting logic occurs within a `BEGIN ISOLATION LEVEL REPEATABLE READ` block
 * **TOCTOU Fix (Critical):** The worker MUST execute `SELECT ... FOR UPDATE` on the root user row *first*, establishing the snapshot lock, *before* executing the graph traversal.
 * **Dynamic Masking:** Reads `graph.root_pii_columns`. Dynamically generates the `UPDATE` SQL using `postgres.js` tagged templates (`STATIC_MASK` $\to$ '[REDACTED]', `HMAC` $\to$ hash, `NULLIFY` $\to$ NULL).
 * **Satellite Chunking (Deadlock Mitigation):** For unlinked tables, it MUST NOT run a blanket update. It uses Cursor-Based Batching: `WITH batch AS (SELECT id ... LIMIT 1000 FOR UPDATE SKIP LOCKED) UPDATE ...`.
+* **Blob Lifecycle:** Reads `blob_targets`. For AWS S3 targets, the worker parses only configured object URL columns, stores the raw Bucket/Key/VersionID locally in `blob_objects`, applies Object Lock Legal Hold during vaulting, and replaces the live URL with an HMAC pseudonym. Raw object keys may contain PII and MUST NOT leave the client VPC.
 * **Shadow Mode:** If requested via the payload, the worker executes all cryptography and logic, but explicitly calls `tx.rollback()` at the end, throwing a custom `ShadowModeRollback` to safely benchmark production loads without altering data.
+
+#### 6.3.1 Blob Shredding Semantics
+* `versioned_hard_delete`: On `SHRED_USER`, the worker calls S3 `ListObjectVersions` and deletes every version/delete marker for the captured key after releasing the legal hold. This is the legally complete purge path for versioned buckets.
+* `hard_delete`: Deletes only the captured version ID. Use only when the client has a separate written control proving no older versions exist.
+* `overwrite`: During vaulting, overwrites the object with the configured non-PII placeholder to keep application links stable. During shredding, old versions are deleted and the sanitized overwrite version is retained.
+* `legal_hold_only`: Keeps the object under legal hold and reports it as retained by policy, not purged.
+* The `SHRED_SUCCESS` outbox payload contains HMACed object references, HMACed version identifiers, counts, and purge statuses. It never contains the raw bucket, key, URL, or object bytes.
 
 #### 6.4. Egress Outbox Loop
 * A background async loop queries the local `outbox` table using `FOR UPDATE SKIP LOCKED`.

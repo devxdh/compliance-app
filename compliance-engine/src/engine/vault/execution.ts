@@ -4,6 +4,7 @@ import { generateDEK, wrapKey } from "../../crypto/envelope";
 import { getDependencyGraph } from "../../db/graph";
 import { fail } from "../../errors";
 import { bytesToBase64, bytesToHex } from "../../utils/encoding";
+import { hasBlobTargetValues, protectBlobTargets } from "../blob/s3";
 import type { VaultUserOptions, VaultUserResult } from "../contracts";
 import {
   createPseudonym,
@@ -67,6 +68,9 @@ export async function runVaultMutation(
           ...new Set([
             ...Object.keys(context.rootContext.rootPiiColumns),
             ...context.rootContext.satelliteTargets.map((target) => target.lookup_column),
+            ...context.rootContext.blobTargets
+              .filter((target) => target.table === context.rootContext.rootTable)
+              .map((target) => target.column),
           ]),
         ];
         const tenantFilter = context.tenantId ? tx` AND tenant_id = ${context.tenantId}` : tx``;
@@ -182,8 +186,25 @@ export async function runVaultMutation(
           context.hmacKey,
           context.tenantId
         );
+        const hasBlobObjects = await hasBlobTargetValues({
+          tx,
+          appSchema: context.appSchema,
+          engineSchema: context.engineSchema,
+          rootTable: context.rootContext.rootTable,
+          rootIdColumn: context.rootContext.rootIdColumn,
+          rootId: subjectId,
+          userHash: context.userHash,
+          requestId: context.options.requestId,
+          tenantId: context.tenantId,
+          targets: context.rootContext.blobTargets,
+          lockedRootRow,
+          hmacKey: context.hmacKey,
+          s3Client: context.options.s3Client,
+          shadowMode: context.options.shadowMode,
+          now: context.now,
+        });
 
-        if (dependencyCount === 0) {
+        if (dependencyCount === 0 && !hasBlobObjects) {
           const deleted = await tx`
             DELETE FROM ${tx(context.appSchema)}.${tx(context.rootContext.rootTable)}
             WHERE ${tx(context.rootContext.rootIdColumn)} = ${subjectId}
@@ -253,7 +274,13 @@ export async function runVaultMutation(
         }
 
         const rootPiiPayload: Record<string, unknown> = {};
-        for (const column of Object.keys(context.rootContext.rootPiiColumns)) {
+        const payloadColumns = new Set([
+          ...Object.keys(context.rootContext.rootPiiColumns),
+          ...context.rootContext.blobTargets
+            .filter((target) => target.table === context.rootContext.rootTable)
+            .map((target) => target.column),
+        ]);
+        for (const column of payloadColumns) {
           rootPiiPayload[column] = lockedRootRow[column] ?? null;
         }
 
@@ -328,6 +355,24 @@ export async function runVaultMutation(
           VALUES (${context.userHash}, ${wrappedDEK}, ${context.now})
         `;
 
+        const blobProtection = await protectBlobTargets({
+          tx,
+          appSchema: context.appSchema,
+          engineSchema: context.engineSchema,
+          rootTable: context.rootContext.rootTable,
+          rootIdColumn: context.rootContext.rootIdColumn,
+          rootId: subjectId,
+          userHash: context.userHash,
+          requestId: context.options.requestId,
+          tenantId: context.tenantId,
+          targets: context.rootContext.blobTargets,
+          lockedRootRow,
+          hmacKey: context.hmacKey,
+          s3Client: context.options.s3Client,
+          shadowMode: context.options.shadowMode,
+          now: context.now,
+        });
+
         const rootMutationValues: Record<string, string | null> = {};
         for (const [column, mutation] of Object.entries(context.rootContext.rootPiiColumns)) {
           rootMutationValues[column] = await computeMutationValue(
@@ -339,6 +384,7 @@ export async function runVaultMutation(
             context.hmacKey
           );
         }
+        Object.assign(rootMutationValues, blobProtection.rootColumnMasks);
 
         await tx`
           UPDATE ${tx(context.appSchema)}.${tx(context.rootContext.rootTable)}
@@ -373,6 +419,7 @@ export async function runVaultMutation(
             notification_due_at: notificationDueAt.toISOString(),
             vaulted_at: context.now.toISOString(),
             satellite_mutations: satelliteMutations,
+            blob_protections: blobProtection.receipts,
           },
           buildVaultEventIdempotencyKey(
             context.options,
@@ -397,6 +444,7 @@ export async function runVaultMutation(
             notificationDueAt: notificationDueAt.toISOString(),
             pseudonym,
             outboxEventType: "USER_VAULTED",
+            blobProtectionCount: blobProtection.receipts.length,
           },
           context.options.shadowMode ?? false
         );

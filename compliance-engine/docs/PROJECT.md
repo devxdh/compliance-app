@@ -22,6 +22,7 @@ The worker executes graph traversal for relational data, but for unlinked data, 
 
   * **Relational Root:** The client defines the `app_schema` and `root_table` (e.g., `users`).
   * **Satellite Targets (Unlinked PII):** The client must explicitly list every non-relational table containing PII. The worker will only touch the tables declared in this configuration matrix.
+  * **Blob Targets (Object PII):** The client must explicitly list every S3 URL column containing documents, images, or other PII-bearing objects. The worker stores raw Bucket/Key/VersionID only in the local engine schema and sends only HMACed receipts to the Control Plane.
 
 **Example Matrix:**
 
@@ -33,6 +34,14 @@ satellite_targets:
     masking_rules:
       name: "STATIC_MASK"
       phone_number: "HMAC"
+blob_targets:
+  - table: "users"
+    column: "kyc_document_url"
+    provider: "aws_s3"
+    region: "ap-south-1"
+    action: "versioned_hard_delete"
+    retention_mode: "governance"
+    require_version_id: true
 ```
 
 -----
@@ -55,10 +64,11 @@ The worker's operation is an infinite loop of deterministic state transitions. H
 | Phase | Operation | Where it Happens | How it Executes (Mechanisms) |
 | :--- | :--- | :--- | :--- |
 | **Phase 1: Pre-Flight Validation** | Schema Assertion & Drift Detection | **VPC / RAM**<br>*(On Boot)* | Parses `compliance.worker.yml`. Hashes `information_schema.columns` via Web Crypto SHA-256 to verify the database matches the allowed topology. Halts on drift detection. |
-| **Phase 2: Task Polling** | Egress Sync | **Network**<br>*(Continuous)* | Long-polls the Control Plane via HTTPS. Receives opaque instructions (e.g., `{ task_type: "VAULT_USER", userId: 1042 }`). |
+| **Phase 2: Task Polling** | Egress Sync | **Network**<br>*(Continuous)* | Uses a bounded short-poll loop against the Control Plane via HTTPS. Receives opaque instructions (e.g., `{ task_type: "VAULT_USER", userId: 1042 }`). |
 | **Phase 3: Graph Discovery** | Relational Footprint Mapping | **DB Replica**<br>*(Task Start)* | Executes a Recursive CTE to traverse the $O(V+E)$ foreign-key graph rooted at the target `user_id`. Tracks `max_depth` to prevent $O(\infty)$ cyclic loops. |
 | **Phase 4: Satellite Redaction** | Unlinked PII Processing | **Primary DB**<br>*(Mutation Phase)* | Iterates through explicit `satellite_targets`. Executes Cursor-Based Batching to avoid deadlocks:<br>`WITH batch AS (SELECT id FROM targets LIMIT 1000 FOR UPDATE SKIP LOCKED) UPDATE...` |
 | **Phase 5: Atomic Vaulting** | Cryptography & State Transition | **Primary DB**<br>*(Mutation Phase)* | Opens `REPEATABLE READ` transaction. Locks the root row (`SELECT FOR UPDATE`). Generates DEK, encrypts PII, wraps DEK, generates HMAC pseudonyms, and inserts into `pii_vault`. |
+| **Phase 5B: Blob Protection** | S3 Legal Hold & URL Masking | **S3 + Primary DB**<br>*(Mutation Phase)* | For configured `blob_targets`, resolves S3 object versions, applies Object Lock Legal Hold, optionally writes a sanitized placeholder, records raw object coordinates locally, and replaces live URL values with HMAC pseudonyms. |
 | **Phase 6: The Outbox Commit** | Tamper-Evident Logging | **Primary DB**<br>*(Transaction End)* | Enqueues a `USER_VAULTED` event. Hashes the payload against the `previous_hash` (Hash Chaining) for WORM compliance. Commits the transaction. |
 | **Phase 7: Network Relay** | CoE Dispatch | **Background Loop**<br>*(Continuous)* | Claims outbox events via `FOR UPDATE SKIP LOCKED`. Dispatches to Control Plane. Applies exponential backoff ($T_{retry} = base \times 2^{attempt}$) for failures. |
 
@@ -76,8 +86,8 @@ Vaulting is Stage 1. The worker operates entirely autonomously to complete the c
 ### The Crypto-Shredder (Stage 3)
 
   * **When:** Upon reaching `compliance_policy.retention_years`.
-  * **What:** The absolute terminal state. The worker locks the vault, verifies the notice was sent, and executes a hard `DELETE` on the user's specific DEK within `user_keys`.
-  * **Result:** The AES-256-GCM payload in the vault becomes mathematically impossible to decrypt. The row is updated with a sentinel marker `{ "destroyed": true }`.
+  * **What:** The absolute terminal state. The worker locks the vault, verifies the notice was sent, purges configured S3 blob versions, and executes a hard `DELETE` on the user's specific DEK within `user_keys`.
+  * **Result:** The AES-256-GCM payload in the vault becomes mathematically impossible to decrypt. The row is updated with a sentinel marker `{ "destroyed": true }`, and S3 receipts are added to `SHRED_SUCCESS` without raw object paths.
 
 -----
 

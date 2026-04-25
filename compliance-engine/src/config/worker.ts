@@ -91,6 +91,64 @@ const satelliteTargetSchema = z
 
 export type SatelliteTarget = z.infer<typeof satelliteTargetSchema>;
 
+const blobTargetSchema = z
+  .object({
+    table: z.string().min(1),
+    column: z.string().min(1),
+    lookup_column: z.string().min(1).optional(),
+    provider: z.literal("aws_s3"),
+    region: z.string().min(1),
+    action: z.enum(["versioned_hard_delete", "hard_delete", "overwrite", "legal_hold_only"]),
+    retention_mode: z.enum(["governance", "compliance"]).default("governance"),
+    expected_bucket_owner: z.string().regex(/^\d{12}$/).optional(),
+    require_version_id: z.boolean().default(true),
+    masking_blob_path: z.string().min(1).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    try {
+      assertIdentifier(value.table, "blob target table name");
+    } catch (error) {
+      ctx.addIssue({
+        code: "custom",
+        message: error instanceof Error ? error.message : "Invalid blob target table name.",
+        path: ["table"],
+      });
+    }
+
+    try {
+      assertIdentifier(value.column, "blob target column name");
+    } catch (error) {
+      ctx.addIssue({
+        code: "custom",
+        message: error instanceof Error ? error.message : "Invalid blob target column name.",
+        path: ["column"],
+      });
+    }
+
+    if (value.lookup_column) {
+      try {
+        assertIdentifier(value.lookup_column, "blob target lookup column");
+      } catch (error) {
+        ctx.addIssue({
+          code: "custom",
+          message: error instanceof Error ? error.message : "Invalid blob target lookup column.",
+          path: ["lookup_column"],
+        });
+      }
+    }
+
+    if (value.action === "overwrite" && !value.masking_blob_path) {
+      ctx.addIssue({
+        code: "custom",
+        message: "blob target masking_blob_path is required for overwrite actions.",
+        path: ["masking_blob_path"],
+      });
+    }
+  });
+
+export type BlobTarget = z.infer<typeof blobTargetSchema>;
+
 const retentionRuleSchema = z
   .object({
     rule_name: z.string().min(1),
@@ -163,6 +221,7 @@ const workerYamlSchema = z
       })
       .strict(),
     satellite_targets: z.array(satelliteTargetSchema).min(1),
+    blob_targets: z.array(blobTargetSchema).default([]),
     outbox: z
       .object({
         batch_size: z.number().int().min(1),
@@ -252,6 +311,16 @@ const workerYamlSchema = z
         });
       }
     }
+
+    for (const [index, target] of value.blob_targets.entries()) {
+      if (target.table !== value.graph.root_table && !target.lookup_column) {
+        ctx.addIssue({
+          code: "custom",
+          message: "blob target lookup_column is required when table is not the graph root table.",
+          path: ["blob_targets", index, "lookup_column"],
+        });
+      }
+    }
   });
 
 type WorkerYamlConfig = z.infer<typeof workerYamlSchema>;
@@ -299,6 +368,16 @@ function normalizeWorkerYaml(config: WorkerYamlConfig): WorkerYamlConfig {
           ])
         )
         : undefined,
+    })),
+    blob_targets: config.blob_targets.map((target) => ({
+      ...target,
+      table: assertIdentifier(target.table, "blob target table name"),
+      column: assertIdentifier(target.column, "blob target column name"),
+      lookup_column: target.lookup_column
+        ? assertIdentifier(target.lookup_column, "blob target lookup column")
+        : undefined,
+      region: target.region.trim(),
+      masking_blob_path: target.masking_blob_path?.trim(),
     })),
     compliance_policy: {
       ...config.compliance_policy,

@@ -1,6 +1,8 @@
 import postgres from "postgres";
 import { fail } from "../errors";
 import { getLogger } from "../observability/logger";
+import { shredBlobObjects } from "./blob/s3";
+import { countPendingBlobObjectsForUser } from "./blob/store";
 import type { ShredUserOptions, ShredUserResult } from "./contracts";
 import { DESTROYED_PII_SENTINEL, enqueueOutboxEvent, getVaultRecordByUserId, resolveSchemas } from "./support";
 
@@ -154,6 +156,22 @@ export async function shredUser(
       });
     }
 
+    const pendingBlobCount = await countPendingBlobObjectsForUser(
+      tx,
+      engineSchema,
+      lockedVault.user_uuid_hash
+    );
+    if (pendingBlobCount > 0 && !options.hmacKey) {
+      fail({
+        code: "DPDP_SHREDDER_BLOB_HMAC_KEY_MISSING",
+        title: "Blob shred HMAC key missing",
+        detail: "Blob deletion receipts require the worker HMAC key so raw S3 object paths never leave the VPC.",
+        category: "configuration",
+        retryable: false,
+        fatal: true,
+      });
+    }
+
     const deletedKeys = await tx`
       DELETE FROM ${tx(engineSchema)}.user_keys
       WHERE user_uuid_hash = ${lockedVault.user_uuid_hash}
@@ -179,6 +197,17 @@ export async function shredUser(
       WHERE user_uuid_hash = ${lockedVault.user_uuid_hash}
     `;
 
+    const blobReceipts = options.hmacKey
+      ? await shredBlobObjects(
+        tx,
+        engineSchema,
+        lockedVault.user_uuid_hash,
+        options.hmacKey,
+        now,
+        options.s3Client
+      )
+      : [];
+
     await enqueueOutboxEvent(
       tx,
       engineSchema,
@@ -198,6 +227,7 @@ export async function shredUser(
         root_table: rootTable,
         root_id: normalizedSubjectId,
         shredded_at: now.toISOString(),
+        blob_receipts: blobReceipts,
       },
       lockedVault.request_id
         ? `shred:${lockedVault.request_id}`
@@ -220,6 +250,7 @@ export async function shredUser(
       dryRun: false,
       shreddedAt: now.toISOString(),
       outboxEventType: "SHRED_SUCCESS",
+      blobReceiptCount: blobReceipts.length,
     };
   });
 }

@@ -40,6 +40,8 @@ satellite_targets:
     lookup_column: "user_identifier"
     action: "hard_delete"
 
+blob_targets: []
+
 outbox:
   batch_size: 10
   lease_seconds: 60

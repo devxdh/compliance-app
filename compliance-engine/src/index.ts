@@ -11,6 +11,7 @@ import { workerError } from "./errors";
 import type { MockMailer } from "./engine/notifier";
 import { createFetchDispatcher } from "./network/outbox";
 import { createControlPlaneApiClient } from "./network/control-plane";
+import { createS3Client } from "./network/s3-client";
 import { getLogger, logError } from "./observability/logger";
 import { registerProcessGuards } from "./runtime/guards";
 import { sha256Hex } from "./utils/digest";
@@ -194,6 +195,7 @@ async function main() {
       secrets: { kek: config.masterKey, hmacKey: config.hmacKey },
       apiClient,
       mailer,
+      s3Client: config.blob_targets.length > 0 ? createS3Client() : undefined,
     });
 
     const metricsPort = Number(process.env.METRICS_PORT ?? "9464");

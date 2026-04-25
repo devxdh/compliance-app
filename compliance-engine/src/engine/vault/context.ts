@@ -1,4 +1,4 @@
-import type { MutationRule, RootPiiColumns, SatelliteTarget } from "../../config/worker";
+import type { BlobTarget, MutationRule, RootPiiColumns, SatelliteTarget } from "../../config/worker";
 import { generateHMAC } from "../../crypto/hmac";
 import { assertIdentifier, quoteQualifiedIdentifier } from "../../db/identifiers";
 import { fail } from "../../errors";
@@ -13,6 +13,7 @@ export interface RootMutationContext {
   rootIdColumn: string;
   rootPiiColumns: RootPiiColumns;
   satelliteTargets: SatelliteTarget[];
+  blobTargets: BlobTarget[];
 }
 
 /**
@@ -141,12 +142,21 @@ export function resolveRootContext(options: VaultUserOptions): RootMutationConte
     table: assertIdentifier(target.table, "satellite table name"),
     lookup_column: assertIdentifier(target.lookup_column, "satellite lookup column"),
   }));
+  const blobTargets = (options.blobTargets ?? []).map((target) => ({
+    ...target,
+    table: assertIdentifier(target.table, "blob target table name"),
+    column: assertIdentifier(target.column, "blob target column name"),
+    lookup_column: target.lookup_column
+      ? assertIdentifier(target.lookup_column, "blob target lookup column")
+      : undefined,
+  }));
 
   return {
     rootTable,
     rootIdColumn,
     rootPiiColumns,
     satelliteTargets,
+    blobTargets,
   };
 }
 

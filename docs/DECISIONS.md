@@ -34,6 +34,7 @@ The client must explicitly declare all targets. If any required field is omitted
 
 * **Schema Drift Detection:** At boot, the Worker hashes the `information_schema.columns` of the target database. If the database schema has mutated but the YAML has not been updated, the Worker halts. *Protection:* Prevents partial vaulting of undocumented databases.
 * **Satellite Targets:** Unlinked tables containing PII (e.g., `marketing_leads`) must be manually mapped by the client with specific actions (`redact` or `hard_delete`).
+* **Blob Targets:** Object-storage URLs are treated as PII because keys often contain names, document types, or KYC identifiers. S3 targets must be explicitly declared with table, column, region, action, object-lock mode, and versioning expectations. Raw Bucket/Key/VersionID coordinates stay only in the worker-local `blob_objects` table.
 * **Referential Integrity Guardrail:** Graph traversal rejects `ON DELETE CASCADE`, `ON DELETE SET NULL`, and `ON DELETE SET DEFAULT` dependencies beneath the root table. Those constraints can silently mutate rows outside the explicit vaulting plan, so the worker fails closed and requires schema remediation.
 
 ---
@@ -67,6 +68,18 @@ Before calculating the $O(V+E)$ relational dependency graph, the Worker executes
 * **Envelope Encryption:** The PII is encrypted via AES-256-GCM. The unique 12-byte IV and 16-byte Auth Tag ensure that if a single byte is tampered with on disk, the decryption will violently fail rather than silently return corrupted data.
 * **Pseudonymization (HMAC-SHA256):** Replaces identifiers (e.g., emails) in the root table and satellite tables. This preserves relational integrity (allowing PMLA audits to track "User A" across the system) while permanently destroying the ability to know that "User A" is "Alice."
 * **Temporal Precision:** Time math is offloaded to the database (`NOW() + MAKE_INTERVAL(years := 10)`). *Protection:* Prevents Node.js/Bun DST and leap-year drift.
+
+### 4.3 Shadow PII in Object Storage
+**The Decision:** Files referenced from the relational graph are part of the erasure boundary when explicitly mapped in `blob_targets`.
+**The Liability Shield:** A database-only deletion can leave passport scans, Aadhaar images, invoices, or KYC PDFs alive in S3. The worker therefore manages a local object lifecycle without exporting file content or raw object keys to the Control Plane.
+
+Lifecycle:
+1. **Vaulting:** Parse configured S3 URLs, resolve Bucket/Key/VersionID, apply S3 Object Lock Legal Hold, and store raw object coordinates in `dpdp_engine.blob_objects`.
+2. **Metadata Archival:** Replace the live URL column with an HMAC pseudonym so application tables no longer expose PII-bearing filenames.
+3. **Sanitized Overwrite:** If configured as `overwrite`, replace the object body with a non-PII placeholder while preserving application link stability.
+4. **Shredding:** On `SHRED_USER`, release the legal hold and delete the captured object version, or for `versioned_hard_delete`, enumerate and delete every object version/delete marker.
+
+Control Plane receipts intentionally contain only HMACed object references, deletion counts, and HMACed version identifiers. Raw S3 keys can contain PII and must remain inside the client's VPC.
 
 ---
 

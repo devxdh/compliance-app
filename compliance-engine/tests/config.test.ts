@@ -65,6 +65,14 @@ satellite_targets:
   - table: audit_logs
     lookup_column: user_identifier
     action: hard_delete
+blob_targets:
+  - table: users
+    column: kyc_document_url
+    provider: aws_s3
+    region: ap-south-1
+    action: versioned_hard_delete
+    retention_mode: governance
+    expected_bucket_owner: "123456789012"
 outbox:
   batch_size: 20
   lease_seconds: 90
@@ -118,6 +126,20 @@ legal_attestation:
       full_name: "STATIC_MASK",
     });
     expect(config.satellite_targets).toHaveLength(2);
+    expect(config.blob_targets).toEqual([
+      {
+        table: "users",
+        column: "kyc_document_url",
+        lookup_column: undefined,
+        provider: "aws_s3",
+        region: "ap-south-1",
+        action: "versioned_hard_delete",
+        retention_mode: "governance",
+        expected_bucket_owner: "123456789012",
+        require_version_id: true,
+        masking_blob_path: undefined,
+      },
+    ]);
     expect(config.outbox.batch_size).toBe(20);
     expect(config.security.notification_lease_seconds).toBe(180);
     expect(config.legal_attestation).toEqual({

@@ -283,6 +283,12 @@ If the dependency count is greater than `0`:
   - `STATIC_MASK`
   - `NULLIFY`
 - applies configured satellite redactions or hard deletes
+- applies configured S3 blob protections:
+  - parses declared object URL columns only
+  - stores raw Bucket/Key/VersionID in the worker-local `blob_objects` table
+  - applies S3 Object Lock Legal Hold in live mode
+  - optionally overwrites the object with a non-PII placeholder
+  - masks the live URL column with an HMAC value
 - emits `USER_VAULTED`
 
 #### Retention result
@@ -325,11 +331,14 @@ Flow:
 2. refuse shredding before `retention_expiry`
 3. refuse shredding if notice is required but missing
 4. delete the DEK from `user_keys`
-5. replace `encrypted_pii` with a destroyed sentinel
-6. set `shredded_at`
-7. append `SHRED_SUCCESS`
+5. purge configured S3 blob objects according to their declared action
+6. replace `encrypted_pii` with a destroyed sentinel
+7. set `shredded_at`
+8. append `SHRED_SUCCESS`
 
 After this point, the ciphertext is no longer decryptable because the key is gone.
+
+Blob receipts in `SHRED_SUCCESS` contain only HMACed object references, HMACed version identifiers, version counts, and purge status. Raw S3 bucket names, keys, URLs, and object bytes never leave the client VPC because object keys can themselves contain PII.
 
 ## 10. Control Plane State Machine
 

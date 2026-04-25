@@ -101,6 +101,100 @@ export async function runMigrations(sql: postgres.Sql, engineSchema: string = "d
     `;
 
     await tx`
+      CREATE TABLE IF NOT EXISTS ${tx(safeEngineSchema)}.blob_objects (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_uuid_hash TEXT NOT NULL REFERENCES ${tx(safeEngineSchema)}.pii_vault(user_uuid_hash) ON DELETE CASCADE,
+        request_id TEXT,
+        tenant_id TEXT NOT NULL DEFAULT '',
+        root_schema TEXT NOT NULL,
+        root_table TEXT NOT NULL,
+        root_id TEXT NOT NULL,
+        source_table TEXT NOT NULL,
+        source_column TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        action TEXT NOT NULL,
+        retention_mode TEXT NOT NULL DEFAULT 'governance',
+        region TEXT NOT NULL,
+        expected_bucket_owner TEXT,
+        bucket TEXT NOT NULL,
+        object_key TEXT NOT NULL,
+        version_id TEXT NOT NULL,
+        e_tag TEXT,
+        masked_value TEXT NOT NULL,
+        legal_hold_status TEXT NOT NULL DEFAULT 'ON',
+        legal_hold_applied_at TIMESTAMPTZ,
+        overwrite_status TEXT NOT NULL DEFAULT 'not_requested',
+        overwrite_e_tag TEXT,
+        overwrite_version_id TEXT,
+        overwrite_applied_at TIMESTAMPTZ,
+        shred_status TEXT NOT NULL DEFAULT 'pending',
+        shred_receipt JSONB,
+        shredded_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT blob_objects_provider_check CHECK (provider IN ('aws_s3')),
+        CONSTRAINT blob_objects_action_check CHECK (action IN ('versioned_hard_delete', 'hard_delete', 'overwrite', 'legal_hold_only')),
+        CONSTRAINT blob_objects_retention_mode_check CHECK (retention_mode IN ('governance', 'compliance')),
+        CONSTRAINT blob_objects_hold_status_check CHECK (legal_hold_status IN ('ON', 'OFF', 'not_supported')),
+        CONSTRAINT blob_objects_overwrite_status_check CHECK (overwrite_status IN ('not_requested', 'applied')),
+        CONSTRAINT blob_objects_shred_status_check CHECK (shred_status IN ('pending', 'purged', 'captured_version_deleted', 'retained_by_policy'))
+      )
+    `;
+
+    await tx`
+      ALTER TABLE ${tx(safeEngineSchema)}.blob_objects
+      ADD COLUMN IF NOT EXISTS request_id TEXT,
+      ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT '',
+      ADD COLUMN IF NOT EXISTS root_schema TEXT,
+      ADD COLUMN IF NOT EXISTS root_table TEXT,
+      ADD COLUMN IF NOT EXISTS root_id TEXT,
+      ADD COLUMN IF NOT EXISTS source_table TEXT,
+      ADD COLUMN IF NOT EXISTS source_column TEXT,
+      ADD COLUMN IF NOT EXISTS provider TEXT,
+      ADD COLUMN IF NOT EXISTS action TEXT,
+      ADD COLUMN IF NOT EXISTS retention_mode TEXT NOT NULL DEFAULT 'governance',
+      ADD COLUMN IF NOT EXISTS region TEXT,
+      ADD COLUMN IF NOT EXISTS expected_bucket_owner TEXT,
+      ADD COLUMN IF NOT EXISTS bucket TEXT,
+      ADD COLUMN IF NOT EXISTS object_key TEXT,
+      ADD COLUMN IF NOT EXISTS version_id TEXT,
+      ADD COLUMN IF NOT EXISTS e_tag TEXT,
+      ADD COLUMN IF NOT EXISTS masked_value TEXT,
+      ADD COLUMN IF NOT EXISTS legal_hold_status TEXT NOT NULL DEFAULT 'ON',
+      ADD COLUMN IF NOT EXISTS legal_hold_applied_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS overwrite_status TEXT NOT NULL DEFAULT 'not_requested',
+      ADD COLUMN IF NOT EXISTS overwrite_e_tag TEXT,
+      ADD COLUMN IF NOT EXISTS overwrite_version_id TEXT,
+      ADD COLUMN IF NOT EXISTS overwrite_applied_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS shred_status TEXT NOT NULL DEFAULT 'pending',
+      ADD COLUMN IF NOT EXISTS shred_receipt JSONB,
+      ADD COLUMN IF NOT EXISTS shredded_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    `;
+
+    await tx`
+      CREATE UNIQUE INDEX IF NOT EXISTS blob_objects_identity_idx
+      ON ${tx(safeEngineSchema)}.blob_objects (
+        user_uuid_hash,
+        source_table,
+        source_column,
+        bucket,
+        object_key,
+        version_id
+      )
+    `;
+
+    await tx`
+      CREATE INDEX IF NOT EXISTS blob_objects_shred_idx
+      ON ${tx(safeEngineSchema)}.blob_objects (user_uuid_hash, shred_status)
+    `;
+
+    await tx`
+      CREATE INDEX IF NOT EXISTS blob_objects_object_idx
+      ON ${tx(safeEngineSchema)}.blob_objects (provider, bucket, object_key, shred_status)
+    `;
+
+    await tx`
       CREATE TABLE IF NOT EXISTS ${tx(safeEngineSchema)}.outbox (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         idempotency_key TEXT NOT NULL UNIQUE,

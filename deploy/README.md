@@ -20,6 +20,14 @@
   - `hashicorp_vault`: calls Vault KV v2 at `/:mount/data/:path` and reads the configured field.
 - Remote key providers are resolved at worker boot via `readWorkerConfigFromRuntime`; the synchronous config reader is intentionally limited to env/file sources for tests and local tooling.
 
+## S3 blob erasure
+- `blob_targets` in `compliance.worker.yml` extend the erasure boundary to PII-bearing object URLs such as KYC scans or invoice PDFs.
+- The worker uses native SigV4 signing and the local AWS credential chain only; the AWS SDK is intentionally not part of the runtime.
+- Supported credential paths are static `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, ECS task credentials, and EC2 IMDSv2. In production, prefer task or instance roles scoped to only the configured buckets and actions.
+- Required IAM actions depend on the chosen blob action: `s3:HeadObject`, `s3:PutObjectLegalHold`, `s3:ListBucketVersions`, `s3:DeleteObjectVersion`, and optionally `s3:PutObject` for sanitized overwrite.
+- Raw S3 bucket/key/version coordinates are stored only in the worker-local `dpdp_engine.blob_objects` table. Control Plane outbox events receive HMACed object references and counts, not raw paths.
+- Buckets using `versioned_hard_delete` must have versioning enabled. Buckets using Legal Hold must have S3 Object Lock enabled before objects are created.
+
 ## Schema and FK safety
 - The worker now fails closed if graph traversal finds `ON DELETE CASCADE`, `ON DELETE SET NULL`, or `ON DELETE SET DEFAULT` below the root table. Those actions can mutate dependent rows outside the explicit vault/redaction plan.
 - Client schemas should use `NO ACTION`/`RESTRICT` FKs for data under erasure control, then let the worker perform explicit satellite chunking or hard-delete steps.

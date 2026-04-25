@@ -1,5 +1,6 @@
 import type postgres from "postgres";
 import type { WorkerConfig } from "./config/worker";
+import type { S3Client } from "./network/s3-client";
 import type {
   DispatchNoticeResult,
   ShredUserResult,
@@ -82,6 +83,7 @@ export interface ComplianceWorkerOptions {
   config: WorkerConfig;
   apiClient: ApiClient;
   mailer: MockMailer;
+  s3Client?: S3Client;
 }
 
 function resolveTaskSubject(task: WorkerTask): string | number {
@@ -135,6 +137,7 @@ export class ComplianceWorker {
   private readonly config: WorkerConfig;
   private readonly apiClient: ApiClient;
   private readonly mailer: MockMailer;
+  private readonly s3Client?: S3Client;
 
   constructor(options: ComplianceWorkerOptions) {
     this.sql = options.sql;
@@ -143,6 +146,7 @@ export class ComplianceWorker {
     this.config = options.config;
     this.apiClient = options.apiClient;
     this.mailer = options.mailer;
+    this.s3Client = options.s3Client;
   }
 
   private async executeTask(task: WorkerTask, now: Date): Promise<TaskExecutionResult> {
@@ -162,6 +166,7 @@ export class ComplianceWorker {
             rootIdColumn: this.config.graph.root_id_column,
             rootPiiColumns: this.config.graph.root_pii_columns,
             satelliteTargets: this.config.satellite_targets,
+            blobTargets: this.config.blob_targets,
             retentionRules: this.config.compliance_policy.retention_rules,
             tenantId: task.payload.tenant_id,
             requestId: task.payload.request_id,
@@ -172,6 +177,7 @@ export class ComplianceWorker {
             requestTimestamp: task.payload.request_timestamp,
             shadowMode: task.payload.shadow_mode ?? task.payload.shadowMode,
             sqlReplica: this.sqlReplica,
+            s3Client: this.s3Client,
             now,
           }
         );
@@ -193,6 +199,8 @@ export class ComplianceWorker {
           appSchema: this.config.database.app_schema,
           engineSchema: this.config.database.engine_schema,
           rootTable: this.config.graph.root_table,
+          hmacKey: this.secrets.hmacKey,
+          s3Client: this.s3Client,
           now,
         });
 
