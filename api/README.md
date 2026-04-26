@@ -1,12 +1,14 @@
-# DPDP Control Plane API
+# Avantii Control Plane API
 
-Control-plane bootstrap for the DPDP Compliance Engine, built for Bun with:
+Metadata-only Control Plane for the DPDP/PMLA Compliance Engine, built for Bun with:
 
 - `hono`
 - `zod`
 - `@hono/zod-validator`
 - `postgres.js`
-- Web Crypto (`globalThis.crypto`) for Ed25519 Certificate of Erasure signatures
+- Web Crypto (`globalThis.crypto`) for token hashing, WORM hashes, request signing, and Ed25519 Certificate of Erasure signatures
+- `pdf-lib` for signed PDF Certificate of Erasure generation
+- `pino` and `prom-client` for operational logging and metrics
 
 ## Runtime
 
@@ -28,26 +30,47 @@ bun run api:dev
 | `COE_KEY_ID` | CoE signing key identifier | `control-plane-ed25519-v1` |
 | `COE_PRIVATE_KEY_PKCS8_BASE64` | Optional Ed25519 private key | _unset_ |
 | `COE_PUBLIC_KEY_SPKI_BASE64` | Required when private key is set | _unset_ |
+| `ADMIN_API_TOKEN` | Bearer token for `/api/v1/admin/*` | `admin-secret` |
+| `WORKER_REQUEST_SIGNING_SECRET` | Optional HMAC signing secret for worker requests | _unset_ |
+| `SHADOW_BURN_IN_REQUIRED` | Require shadow-mode successes before live mutation | `true` in deployment manifests |
+| `SHADOW_REQUIRED_SUCCESSES` | Shadow successes required for live mutation | `100` |
+| `TASK_MAX_ATTEMPTS` | Task retry limit before DLQ | `10` |
+| `TASK_BASE_BACKOFF_MS` | Base retry backoff | `1000` |
 
 If no keypair env vars are provided, the API generates an in-memory Ed25519 keypair at boot.
 
 ## API Surface
 
 - `POST /api/v1/erasure-requests`
-  - Creates control-plane request and enqueues initial `VAULT_USER` worker task.
+  - Creates a metadata-only erasure job and stores `vault_due_at` using Postgres time math.
+- `POST /api/v1/erasure-requests/:idempotency_key/cancel`
+  - Cancels a job while it is still in `WAITING_COOLDOWN`.
 - `GET /api/v1/worker/sync`
-  - Leases the next worker task (`FOR UPDATE SKIP LOCKED`).
+  - Logs worker config hash heartbeat, materializes due tasks, and leases the next worker task (`FOR UPDATE SKIP LOCKED`).
 - `POST /api/v1/worker/tasks/:taskId/ack`
-  - Persists worker task completion/failure.
+  - Persists worker task completion/failure and applies retry/DLQ policy.
 - `POST /api/v1/worker/outbox`
   - Ingests worker metadata events (`USER_VAULTED`, `NOTIFICATION_SENT`, `SHRED_SUCCESS`).
-  - Mints signed CoE on `SHRED_SUCCESS`.
+  - Verifies hash chaining, records usage, updates job state, finalizes webhooks, and mints signed CoE on `SHRED_SUCCESS`.
 - `GET /api/v1/certificates/:requestId`
   - Returns the signed certificate payload + signature.
+- `GET /api/v1/certificates/:requestId/download`
+  - Returns the signed Certificate of Erasure PDF.
+- `GET /api/v1/admin/*`
+  - Admin-only usage, client management, audit export, erasure request detail, and DLQ recovery endpoints.
+- `GET /metrics`
+  - Prometheus metrics.
 
 ## Testing
 
-- Unit tests: Ed25519 CoE signing/verification (`api/tests/unit`).
-- Integration tests: API + PostgreSQL state-machine flow (`api/tests/integration`).
+- Unit tests cover Ed25519 signing/verification, WORM hash determinism, request signing, and standardized errors.
+- Integration tests cover request lifecycle, admin endpoints, PDF generation, blob receipts, outbox replay, validation rejection, worker auth failures, and certificate availability.
 
 Integration tests require a reachable PostgreSQL at `TEST_DATABASE_URL` (or default localhost DSN).
+
+## Security Notes
+
+- The API never accepts raw PII in erasure requests.
+- Equivalent idempotent retries are accepted; conflicting replays are rejected.
+- The web dashboard must call admin endpoints from server-side code only.
+- Prisma/ORMs are intentionally not used because queue leasing, hash-chain reads, recursive/stateful SQL, and Postgres time math are security-sensitive.

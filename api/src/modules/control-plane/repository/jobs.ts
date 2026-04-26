@@ -3,6 +3,7 @@ import type {
   CreateJobAndQueueTaskInput,
   CreatedJobRecord,
   ErasureJobRow,
+  ListErasureJobsInput,
   RepositoryContext,
   TaskQueueRow,
   TransitionJobFromOutboxInput,
@@ -44,6 +45,37 @@ export async function getJobByIdempotencyKey(
     WHERE idempotency_key = ${idempotencyKey}::uuid
   `;
   return job ?? null;
+}
+
+/**
+ * Lists erasure lifecycle aggregates for operator dashboard views.
+ *
+ * @param context - Repository SQL context.
+ * @param input - Pagination and optional status filter.
+ * @returns Matching erasure jobs newest first.
+ */
+export async function listErasureJobs(
+  context: RepositoryContext,
+  input: ListErasureJobsInput
+): Promise<ErasureJobRow[]> {
+  if (input.status) {
+    return context.sql<ErasureJobRow[]>`
+      SELECT *
+      FROM ${context.sql(context.schema)}.erasure_jobs
+      WHERE status = ${input.status}
+      ORDER BY created_at DESC
+      LIMIT ${input.limit}
+      OFFSET ${input.offset}
+    `;
+  }
+
+  return context.sql<ErasureJobRow[]>`
+    SELECT *
+    FROM ${context.sql(context.schema)}.erasure_jobs
+    ORDER BY created_at DESC
+    LIMIT ${input.limit}
+    OFFSET ${input.offset}
+  `;
 }
 
 /**

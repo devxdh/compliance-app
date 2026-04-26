@@ -3,8 +3,10 @@ resources:
   - serviceaccounts.yaml
   - worker-config-configmap.yaml
   - api-service.yaml
+  - web-service.yaml
   - worker-service.yaml
   - api-deployment.yaml
+  - web-deployment.yaml
   - worker-deployment.yaml
   - poddisruptionbudgets.yaml
   - networkpolicies.yaml

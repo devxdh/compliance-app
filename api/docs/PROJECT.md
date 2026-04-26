@@ -7,6 +7,8 @@ This document describes the current implementation in `api/src` for the Zero-Tru
 - The API is metadata-only and never accepts raw PII fields.
 - Worker endpoints are authenticated using `x-client-id` + `Authorization: Bearer <token>`.
 - Worker tokens are stored as SHA-256 hashes (`worker_api_key_hash`) using Web Crypto (`globalThis.crypto`).
+- Optional request signing can validate worker calls with timestamped HMAC headers.
+- Admin endpoints require `Authorization: Bearer <ADMIN_API_TOKEN>`.
 - Outbox ingestion enforces WORM hash chaining and idempotency semantics.
 - Live mutations are blocked until a worker client completes the configured shadow-mode burn-in threshold.
 
@@ -27,6 +29,7 @@ Migrations in `src/db/migrations.ts` provision:
 - `task_queue`: worker task leasing with lease expiry
 - `audit_ledger`: tamper-evident worker event ledger (`previous_hash`, `current_hash`)
 - `certificates`: immutable Certificate of Erasure payload + signature
+- `usage_events`: idempotent usage accounting rows for billing/export
 
 Performance index highlights:
 
@@ -38,6 +41,8 @@ Performance index highlights:
 1. `POST /api/v1/erasure-requests`
    - Registers erasure job and enqueues worker task in one transactional path.
 2. `GET /api/v1/worker/sync`
+   - Persists worker config heartbeat metadata (`config_hash`, `configuration_version`, `dpo_identifier`) when newly observed.
+   - Materializes due `NOTIFY_USER` and `SHRED_USER` tasks from `notification_due_at` and `shred_due_at`.
    - Claims next available task using `FOR UPDATE SKIP LOCKED`.
    - Called by the worker in a bounded 5-second short-poll loop rather than a held long-poll request.
 3. `POST /api/v1/worker/tasks/:taskId/ack`
@@ -46,8 +51,13 @@ Performance index highlights:
    - Validates hash chain + payload limits + client ownership.
    - Ingests WORM event with `ON CONFLICT (worker_idempotency_key) DO NOTHING`.
    - On `SHRED_SUCCESS`, mints and signs Certificate of Erasure (Ed25519).
+   - Finalizes terminal webhook delivery in a replay-safe path.
 5. `GET /api/v1/certificates/:requestId`
    - Returns signed CoE payload.
+6. `GET /api/v1/certificates/:requestId/download`
+   - Returns signed PDF Certificate of Erasure.
+7. `GET /api/v1/admin/*`
+   - Exposes admin-only usage, clients, erasure request listing/detail, WORM export, and task DLQ recovery.
 
 ### Idempotency and Legal Fail-Safes
 
@@ -57,6 +67,9 @@ Performance index highlights:
 - Outbox payload size is bounded via `MAX_OUTBOX_PAYLOAD_BYTES`.
 - `SHADOW_BURN_IN_REQUIRED=true` requires 100 successful shadow `VAULT_USER` completions by default before the Control Plane accepts live `shadow_mode: false` requests for that worker client.
 - Task failures retry with exponential backoff until `TASK_MAX_ATTEMPTS`, then move to `DEAD_LETTER` for operator recovery.
+- Cancelled jobs are not synced to workers.
+- Future-due jobs are not synced to workers.
+- Admin API traffic is intentionally separated from public erasure request ingestion.
 
 ### Test Guarantees
 
@@ -71,3 +84,4 @@ Current Vitest coverage includes:
   - invalid chain / oversized payload rejection
   - idempotent outbox replay handling
   - certificate 404 before shred completion
+  - admin client management, usage export, DLQ requeue, and PDF generation

@@ -4,6 +4,7 @@ import type { ControlPlaneRepository } from "../control-plane/repository";
 import type {
   AdminAuditExportQueryInput,
   AdminCreateClientInput,
+  AdminErasureRequestQueryInput,
   AdminUsageQueryInput,
 } from "./schemas";
 
@@ -155,6 +156,42 @@ export class AdminService {
       });
     }
     return task;
+  }
+
+  /**
+   * Lists erasure requests for operator lifecycle monitoring.
+   *
+   * @param query - Pagination and optional status filter.
+   * @returns Erasure jobs newest first.
+   */
+  async listErasureRequests(query: AdminErasureRequestQueryInput) {
+    return this.repository.listErasureJobs({
+      status: query.status,
+      limit: query.limit,
+      offset: query.offset,
+    });
+  }
+
+  /**
+   * Fetches one erasure request lifecycle aggregate.
+   *
+   * @param requestId - Erasure request UUID.
+   * @returns Matching erasure job.
+   * @throws {ApiError} When the request does not exist.
+   */
+  async getErasureRequest(requestId: string) {
+    const job = await this.repository.getJobById(requestId);
+    if (!job) {
+      fail({
+        code: "API_ADMIN_ERASURE_REQUEST_NOT_FOUND",
+        title: "Erasure request not found",
+        detail: `Erasure request ${requestId} does not exist.`,
+        status: 404,
+        category: "validation",
+        retryable: false,
+      });
+    }
+    return job;
   }
 
   /**

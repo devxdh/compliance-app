@@ -19,4 +19,14 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: dpdp-worker
-
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: avantii-web
+  namespace: dpdp-compliance
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: avantii-web

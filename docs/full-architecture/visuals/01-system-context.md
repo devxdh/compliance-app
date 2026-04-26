@@ -8,14 +8,17 @@ flowchart LR
     classDef note fill:#f3e5f5,stroke:#6a1b9a,stroke-width:1px,color:#1b1b1b;
 
     Client[Client Backend / DPO System]
+    Operator[Avantii Operator<br/>Browser]
 
     subgraph SaaS[Control Plane / External SaaS Zone]
         API[Brain API<br/>Hono + Zod + postgres.js]
+        Web[Avantii Web BFF<br/>Next.js + Auth.js]
         CPDB[(Control Plane DB<br/>clients<br/>erasure_jobs<br/>task_queue<br/>audit_ledger<br/>certificates<br/>usage_events)]
         Signer[Ed25519 Certificate Signer<br/>inside API]
 
         API --> CPDB
         API --> Signer
+        Web -->|server-side admin token only| API
     end
 
     subgraph VPC[Client VPC / Trusted Zone]
@@ -34,6 +37,7 @@ flowchart LR
     end
 
     Client -->|POST /api/v1/erasure-requests<br/>opaque ids + legal metadata only| API
+    Operator -->|HTTPS dashboard session<br/>HTTP-only cookie| Web
     Worker -->|GET /api/v1/worker/sync<br/>Bearer auth + HMAC request signing| API
     API -->|leased task payload<br/>No-PII metadata only| Worker
     Worker -->|POST /api/v1/worker/outbox<br/>No-PII metadata, hashes, timestamps| API
@@ -42,8 +46,9 @@ flowchart LR
     Boundary[Trust Boundary:<br/>raw PII never leaves the Client VPC]
 
     class Client trusted
+    class Operator trusted
     class Worker,AppDB,AppTables,EngineTables,Metrics,Notice trusted
-    class API,CPDB,Signer control
+    class API,Web,CPDB,Signer control
     class AppDB,CPDB db
     class Boundary note
 ```

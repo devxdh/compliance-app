@@ -1,11 +1,12 @@
 # Complete Project Guide: Version 1 (Business Logic)
 
-This document is the current-state source of truth for the DPDP/PMLA Compliance Engine. It reflects the finalized engine logic, including S3 blob lifecycle management and digitally signed PDF certification.
+This document is the current-state source of truth for the DPDP/PMLA Compliance Engine. It reflects the implemented API, worker, web dashboard, deployment assets, S3 blob lifecycle, and digitally signed PDF certification.
 
 ## 1. System Position & Architecture
 The system operates on a **Two-Plane Zero-Trust Model**:
 *   **Control Plane (API):** Central orchestrator. Manages schedules, task materialization, and legal certification. **Zero-PII Egress:** It never ingests raw user data.
 *   **Data Plane (Worker):** Local executor. Runs inside the client VPC. Mutates the database, encrypts PII, and purges S3 objects.
+*   **Operator Web (BFF):** Next.js dashboard. Reads Control Plane metadata using a server-side admin token. Browser code never receives secrets.
 
 ## 2. Key Components (Implemented)
 
@@ -15,6 +16,8 @@ The system operates on a **Two-Plane Zero-Trust Model**:
 *   **WORM Ledger:** Hash-chained audit logs using SHA-256.
 *   **PDF Generator:** Native `pdf-lib` implementation to generate signed "Proof of Erasure" certificates.
 *   **Task Materializer:** Lazily creates `NOTIFY` and `SHRED` tasks based on worker-reported retention.
+*   **Admin Surface:** Clients, usage, erasure requests, WORM export, and DLQ requeue.
+*   **Webhook Finalization:** Terminal event callbacks are retried through replay-safe finalization.
 
 ### 2.2 Data Plane Worker
 *   **Graph Engine:** Recursive CTE discovery with `max_depth: 32` and circular reference protection.
@@ -22,6 +25,13 @@ The system operates on a **Two-Plane Zero-Trust Model**:
 *   **S3 Provider:** Native SigV4 client for versioned hard-purges and Legal Holds.
 *   **KMS Providers:** Integrated adapters for AWS KMS, GCP Secret Manager, and HashiCorp Vault.
 *   **Liability Firewall:** Schema drift detection and DPO attestation enforcement.
+*   **Mailer Boundary:** Production notice delivery uses a configured webhook transport.
+
+### 2.3 Web Dashboard
+*   **Auth:** Auth.js protected dashboard with operator allowlist.
+*   **BFF:** Server-side calls to `/api/v1/admin/*`; no admin token in the browser.
+*   **Pages:** Overview, erasure requests, lifecycle detail, audit ledger, worker clients, and dead letters.
+*   **Fail-Closed UX:** Missing API token or Control Plane errors show explicit configuration states; no synthetic dashboard data is rendered.
 
 ## 3. Cryptographic Lifecycle
 
@@ -52,6 +62,7 @@ The system operates on a **Two-Plane Zero-Trust Model**:
 *   **Memory Safety:** Explicit zeroing of plaintext and key buffers (`.fill(0)`) after crypto operations.
 *   **Prioritized Outbox:** The relay ensures that terminal legal events (`SHRED_SUCCESS`) are prioritized during catch-up cycles.
 *   **SSRF Protection:** Strict validation of webhook URLs; loopback and private IP ranges are rejected.
+*   **Admin Boundary:** Web dashboard actions pass through server actions and API admin authorization.
 
 ---
-*Last Updated: April 25, 2026*
+*Last Updated: April 26, 2026*

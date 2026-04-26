@@ -198,6 +198,56 @@ describe("Control Plane Admin (Integration)", () => {
     );
   });
 
+  it("lists and fetches erasure request lifecycle aggregates", async () => {
+    const { app } = await setup();
+    const request = buildErasureRequest({
+      subject_opaque_id: "usr_admin_lifecycle",
+      actor_opaque_id: "dpo_admin_lifecycle",
+      legal_framework: "DPDP_2023",
+    });
+    const createResponse = await app.request("/api/v1/erasure-requests", {
+      method: "POST",
+      headers: adminHeaders(),
+      body: JSON.stringify(request),
+    });
+    expect(createResponse.status).toBe(202);
+    const created = (await createResponse.json()) as { request_id: string };
+
+    const listResponse = await app.request("/api/v1/admin/erasure-requests?limit=10&offset=0", {
+      headers: {
+        authorization: "Bearer admin-secret",
+      },
+    });
+    expect(listResponse.status).toBe(200);
+    const jobs = (await listResponse.json()) as Array<{
+      id: string;
+      subject_opaque_id: string;
+      status: string;
+    }>;
+    expect(jobs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: created.request_id,
+          subject_opaque_id: "usr_admin_lifecycle",
+          status: "WAITING_COOLDOWN",
+        }),
+      ])
+    );
+
+    const detailResponse = await app.request(`/api/v1/admin/erasure-requests/${created.request_id}`, {
+      headers: {
+        authorization: "Bearer admin-secret",
+      },
+    });
+    expect(detailResponse.status).toBe(200);
+    expect(await detailResponse.json()).toEqual(
+      expect.objectContaining({
+        id: created.request_id,
+        legal_framework: "DPDP_2023",
+      })
+    );
+  });
+
   it("summarizes usage and exports audit ledger entries", async () => {
     const { app, workerId } = await setup();
     const request = buildErasureRequest({

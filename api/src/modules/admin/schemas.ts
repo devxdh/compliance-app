@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { erasureRequestStatusSchema } from "../control-plane/schemas";
 
 export const adminCreateClientSchema = z
   .object({
@@ -19,6 +20,12 @@ export const adminTaskIdParamSchema = z
   })
   .strict();
 
+export const adminRequestIdParamSchema = z
+  .object({
+    requestId: z.uuid(),
+  })
+  .strict();
+
 export const adminUsageQuerySchema = z
   .object({
     client_name: z.string().trim().min(1).optional(),
@@ -34,6 +41,15 @@ export const adminAuditExportQuerySchema = z
   })
   .strict();
 
+export const adminErasureRequestQuerySchema = z
+  .object({
+    status: erasureRequestStatusSchema.optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    offset: z.coerce.number().int().min(0).default(0),
+  })
+  .strict();
+
 export type AdminCreateClientInput = z.infer<typeof adminCreateClientSchema>;
 export type AdminUsageQueryInput = z.infer<typeof adminUsageQuerySchema>;
 export type AdminAuditExportQueryInput = z.infer<typeof adminAuditExportQuerySchema>;
+export type AdminErasureRequestQueryInput = z.infer<typeof adminErasureRequestQuerySchema>;

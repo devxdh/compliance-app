@@ -13,12 +13,15 @@ The compliance engine resolves the retention paradox between privacy-driven dele
 - They can rely on retryable outbox delivery instead of best-effort API calls.
 - They can ensure compliance via Tamper-Evident Outbox sequences guaranteeing append-only auditability.
 - They can protect data via automated Schema Drift Detection preventing unsafe mutations.
+- They can include S3/KYC document references in the erasure boundary without sending object contents to the Control Plane.
+- They can use shadow mode to prove a configuration before enabling live mutation.
 
 ### For Auditors / Security Reviewers
 
 - They can see that raw PII never leaves the local environment.
 - They can verify that key destruction, not bulk row scanning, is the final erasure primitive.
 - They can inspect durable metadata proving that notice and shred steps were executed in order.
+- They can trace the legal citation and DPO-attested config version used for each retained record.
 
 ### For New Engineers
 
@@ -31,10 +34,15 @@ The compliance engine resolves the retention paradox between privacy-driven dele
 - Worker-owned PostgreSQL schema and migrations
 - Vault / notice / shred operations
 - Transactional outbox relay logic
+- Evidence-based retention rule evaluation
+- Satellite table chunking
+- S3 blob legal hold and version purge
+- Worker metrics, structured errors, and fail-closed boot guards
 - Worker-focused documentation and tests
 
 ## Out Of Scope
 
-- Central API orchestration and certificate signing
-- Billing and multi-tenant control-plane features
-- Deployment manifests and container packaging
+- Billing and payment collection
+- Operator identity/RBAC beyond the current Control Plane/Web integration
+- Client legal advice or automatic legal interpretation
+- Managed hosting operations for a client's VPC

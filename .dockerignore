@@ -4,6 +4,14 @@
 .idea
 node_modules
 **/node_modules
+.next
+**/.next
+test-results
+**/test-results
+playwright-report
+**/playwright-report
+.env
+**/.env
 sessions
 coverage
 dist

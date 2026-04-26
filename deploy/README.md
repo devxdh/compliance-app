@@ -1,13 +1,15 @@
 # Deployment Assets
 
 ## Local stack
-- `docker-compose.yml` brings up Postgres, API, worker, Prometheus, Alertmanager, Grafana, and a local mail/webhook sink.
+- `docker-compose.yml` brings up Postgres, API, worker, Avantii web dashboard, Prometheus, Alertmanager, Grafana, and a local mail/webhook sink.
 - `bun run local:e2e` renders the local worker config, boots the stack, submits an erasure request, waits for a certificate, verifies mail delivery, and tears the stack down.
 
 ## Kubernetes
 - `deploy/k8s/base` contains the least-privilege baseline manifests.
 - The manifests assume an external Postgres service and Vault Secrets Store CSI for secret delivery.
 - Replace placeholder images before deployment.
+- The `avantii-web` service is a server-side BFF. It must receive `AUTH_SECRET`, OAuth credentials, `AVANTII_ADMIN_EMAILS`, and `ADMIN_API_TOKEN` from Kubernetes Secrets. Browser code never receives the admin API token.
+- The web service should also receive `AVANTII_API_BASE_URL` for server-side API calls and `NEXT_PUBLIC_AVANTII_API_BASE_URL` only for public certificate/download links.
 - The namespace enables Kubernetes `restricted` Pod Security admission labels. Keep `runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, and dropped Linux capabilities intact unless a security review approves an exception.
 - Production API manifests enforce the shadow-mode burn-in gate with `SHADOW_BURN_IN_REQUIRED=true` and `SHADOW_REQUIRED_SUCCESSES=100`. The local compose stack disables it only so the deterministic E2E smoke test can execute one live mutation.
 
@@ -19,6 +21,12 @@
   - `gcp_secret_manager`: calls Secret Manager `versions.access` and decodes `payload.data`.
   - `hashicorp_vault`: calls Vault KV v2 at `/:mount/data/:path` and reads the configured field.
 - Remote key providers are resolved at worker boot via `readWorkerConfigFromRuntime`; the synchronous config reader is intentionally limited to env/file sources for tests and local tooling.
+
+## Production gaps outside this repository
+
+- The manifests are a secure baseline, not a managed-cloud release. Production still needs real DNS, TLS certificates, ingress/WAF, external Postgres, backups, centralized logs, external alert routing, and secret manager installation.
+- Payment/billing providers are not deployed here. Usage rows are emitted by the API, but invoicing/GST/payment collection must be added before self-serve launch.
+- OAuth provider credentials and admin allowlists must be provisioned per environment.
 
 ## S3 blob erasure
 - `blob_targets` in `compliance.worker.yml` extend the erasure boundary to PII-bearing object URLs such as KYC scans or invoice PDFs.

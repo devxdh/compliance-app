@@ -5,6 +5,8 @@ import {
   adminAuditExportQuerySchema,
   adminClientNameParamSchema,
   adminCreateClientSchema,
+  adminErasureRequestQuerySchema,
+  adminRequestIdParamSchema,
   adminTaskIdParamSchema,
   adminUsageQuerySchema,
 } from "./schemas";
@@ -67,6 +69,18 @@ export function createAdminRouter(service: AdminService) {
     "/tasks/:taskId/requeue",
     zValidator("param", adminTaskIdParamSchema, validationHook("param")),
     async (c) => c.json(await service.requeueDeadLetter(c.req.valid("param").taskId), 200)
+  );
+
+  router.get(
+    "/erasure-requests",
+    zValidator("query", adminErasureRequestQuerySchema, validationHook("query")),
+    async (c) => c.json(await service.listErasureRequests(c.req.valid("query")), 200)
+  );
+
+  router.get(
+    "/erasure-requests/:requestId",
+    zValidator("param", adminRequestIdParamSchema, validationHook("param")),
+    async (c) => c.json(await service.getErasureRequest(c.req.valid("param").requestId), 200)
   );
 
   router.get(

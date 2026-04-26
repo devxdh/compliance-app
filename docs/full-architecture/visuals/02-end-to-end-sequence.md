@@ -4,6 +4,8 @@
 sequenceDiagram
     autonumber
     actor DPO as Client DPO
+    actor Ops as Avantii Operator
+    participant Web as Web BFF
     participant API as Brain API
     participant CPDB as Control Plane DB
 
@@ -19,6 +21,10 @@ sequenceDiagram
     DPO->>API: POST /api/v1/erasure-requests
     API->>CPDB: Insert erasure_job (WAITING_COOLDOWN)
     API-->>DPO: 202 Accepted
+
+    Ops->>Web: Open dashboard
+    Web->>API: GET /api/v1/admin/erasure-requests (server-side token)
+    API-->>Web: Metadata only
 
     loop Short-Poll (~5s)
         Worker->>API: GET /api/v1/worker/sync
@@ -40,8 +46,14 @@ sequenceDiagram
     Worker->>API: Ack VAULT_USER completed
     Worker->>API: POST /worker/outbox USER_VAULTED
     API->>CPDB: Persist retention timestamps
+    API->>CPDB: Materialize NOTIFY_USER when notification_due_at arrives
 
-    Note over API,Worker: Later... when shred timer expires
+    Note over API,Worker: Later... when notice and shred timers expire
+
+    Worker->>API: Claim task (NOTIFY_USER)
+    Worker->>Engine: Lease vault row and decrypt notice payload in RAM
+    Worker->>API: POST /worker/outbox NOTIFICATION_SENT
+    API->>CPDB: Mark NOTICE_SENT and materialize SHRED_USER when shred_due_at arrives
 
     Worker->>API: Claim task (SHRED_USER)
     

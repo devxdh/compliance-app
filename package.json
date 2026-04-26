@@ -5,7 +5,8 @@
   "workspaces": {
     "packages": [
       "api",
-      "compliance-engine"
+      "compliance-engine",
+      "web"
     ],
     "catalog": {
       "@types/bun": "latest",
@@ -22,19 +23,22 @@
     "engine:test": "bun run --cwd ./compliance-engine test",
     "engine:test-ui": "bun run --cwd ./compliance-engine test:ui",
     "engine:typecheck": "bun run --cwd ./compliance-engine typecheck",
+    "web:dev": "bun run --cwd ./web dev",
+    "web:build": "bun run --cwd ./web build",
+    "web:typecheck": "bun run --cwd ./web typecheck",
+    "web:test": "bun run --cwd ./web test",
     "local:generate-coe-keys": "bun run scripts/generate-coe-keypair.ts",
     "local:render-worker-config": "bun run scripts/render-local-worker-config.ts",
     "local:sign-worker-config": "bun run scripts/sign-worker-config.ts",
     "local:e2e": "bun run scripts/local-e2e.ts",
-    "test": "bun run engine:test",
-    "typecheck": "bun run api:typecheck && bun run engine:typecheck",
-    "check": "bun run typecheck && bun run test"
+    "test": "bun run api:test && bun run engine:test && bun run web:test",
+    "typecheck": "bun run api:typecheck && bun run engine:typecheck && bun run web:typecheck",
+    "check": "bun run typecheck && bun run api:test && bun run engine:test && bun run web:build"
   },
   "devDependencies": {
     "@types/node": "^25.6.0"
   },
   "dependencies": {
-    "postgres": "^3.4.9",
-    "typecript": "^0.0.1-security"
+    "postgres": "^3.4.9"
   }
 }

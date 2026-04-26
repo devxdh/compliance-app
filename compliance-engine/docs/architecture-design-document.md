@@ -22,7 +22,7 @@ Instead of leaving the master key to the safe lying around where a thief could f
 
 #### Technical Terms
 - `DEK (Data Encrypting Key)`: A unique, per-user AES-256 key used to encrypt the PII payload.
-- `KEK (Key Encrypting Key)`: A worker-level master key, injected via environment variables. It never touches the disk. The `DEK` is encrypted with the `KEK` before being stored in the `user_keys` table.
+- `KEK (Key Encrypting Key)`: A worker-level master key resolved from env/file or a configured runtime KMS provider. It is kept in process memory. The `DEK` is encrypted with the `KEK` before being stored in the `user_keys` table.
 
 ### 2. HMAC-Backed Worker Identifiers
 
@@ -46,7 +46,7 @@ The Foreign Key (FK) graph is read from PostgreSQL system catalogs (`pg_constrai
 The worker cannot rely on its own memory to remember what it has done, because what if the power goes out? It writes down exactly what step of the process a user is in directly on the safe itself. This guarantees that if the worker restarts, it won't accidentally vault a user twice or send them two warning emails.
 
 #### Technical Terms
-The state machine is durable. Important columns in `pii_vault` (e.g., `retention_expiry`, `notification_lock_id`, `shredded_at`) track exact lifecycle phases. Atomicity and `REPEATABLE READ` isolation levels ensure that state transitions are strictly idempotent and immune to race conditions.
+The local worker state machine is durable for vault, notice, shred, blob, and outbox execution. The Control Plane owns global scheduling through `erasure_jobs` and `task_queue`; the worker owns local cryptographic state through `pii_vault`, `user_keys`, `blob_objects`, and `outbox`. Atomicity and `REPEATABLE READ` isolation levels ensure local state transitions are idempotent and race-safe.
 
 ### 5. Transactional Outbox With Leases
 
@@ -64,3 +64,5 @@ Before the guard starts locking up safes, they first take a picture of the build
 #### Technical Terms
 - **Schema Drift Detection**: At boot, the worker computes a deterministic `SHA-256` digest of `information_schema.columns` for the target `appSchema`. If the computed live schema digest does not strictly match the `expected_schema_hash` declared in the `compliance.worker.yml` manifest, the worker throws a fatal error and exits (`exit(1)`). This fail-fast mechanism guarantees the worker never performs destructive cryptographic operations on a mutated relational graph.
 - **Tamper-Evident Outbox**: The `dpdp_engine.outbox` functions as a cryptographically verifiable append-only ledger. Every event inserted computes a `current_hash` using `SHA-256(previous_hash + canonical_JSON(payload) + idempotency_key)`. The `previous_hash` is queried in $O(1)$ time via a descending index on `created_at`. This provides an unbroken chain of custody from the `GENESIS` event to the most recent operation, enabling robust auditability and mathematical proof of execution order.
+- **DPO Attestation**: The worker refuses to boot without a signed legal configuration block. The active config hash, version, and DPO identifier are reported to the Control Plane on every sync heartbeat.
+- **Unsafe FK Guardrail**: The graph engine fails closed if a dependent FK would silently cascade, set null, or set default outside the explicit mutation plan.

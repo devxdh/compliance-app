@@ -28,6 +28,8 @@ The worker is a **zero-egress cryptographic state machine** built around:
 - Recursive PostgreSQL graph traversal for foreign-key discovery.
 - A transactional outbox with leases, retries, and dead-letter handling.
 - Time-gated notice and shred stages with idempotent state transitions.
+- Native S3 SigV4 blob lifecycle actions for configured object references.
+- Runtime key resolution from env/file, AWS KMS, GCP Secret Manager, or HashiCorp Vault.
 
 ## Production Guarantees In This Version
 
@@ -40,6 +42,11 @@ The worker is a **zero-egress cryptographic state machine** built around:
 - Failed outbox deliveries back off exponentially and move to `dead_letter` after a configurable retry limit.
 - Dry-run mode exists for vault, notice, and shred paths.
 - Worker configuration is validated up front, including secret decoding and schema-name validation.
+- Worker configuration requires DPO legal attestation and rule-level legal citations.
+- Live vaulting locks the root row before graph traversal and retention evaluation.
+- Critical transactions set local `lock_timeout` and fail closed on contention.
+- Plaintext buffers and DEKs are wiped with `.fill(0)` after cryptographic use.
+- Config hash, config version, and DPO identifier are sent to the Control Plane on sync.
 
 ## Repository Map
 
@@ -55,35 +62,41 @@ The worker is a **zero-egress cryptographic state machine** built around:
   Worker schema provisioning for vault, key ring, and outbox tables.
 - [src/config/worker.ts](src/config/worker.ts)
   Environment validation and worker defaults.
-- [src/engine/vault.ts](src/engine/vault.ts)
-  Stage 1 vaulting and hard-delete fast path.
-- [src/engine/notifier.ts](src/engine/notifier.ts)
-  Stage 3 notice leasing and local mail dispatch.
+- [src/engine/vault/](src/engine/vault/)
+  Stage 1 vaulting, evidence retention, dynamic mutation, shadow rollback, satellite orchestration, and hard-delete fast path.
+- [src/engine/notifier/](src/engine/notifier/)
+  Notice leasing, PII decrypt-in-memory, payload extraction, and mail dispatch.
 - [src/engine/shredder.ts](src/engine/shredder.ts)
   Stage 4 crypto-shredding with legal/timing checks.
-- [src/network/outbox.ts](src/network/outbox.ts)
+- [src/engine/blob/](src/engine/blob/)
+  Blob target discovery, local object receipt store, S3 legal hold, and version-aware purge.
+- [src/network/outbox/](src/network/outbox/)
   Batch claiming, retry policy, dead-letter handling, and fetch-based dispatch support.
+- [src/network/s3-client.ts](src/network/s3-client.ts)
+  Native AWS S3 SigV4 transport without AWS SDK runtime dependency.
+- [src/config/kms.ts](src/config/kms.ts)
+  Runtime secret/key retrieval for env/file, AWS KMS, GCP Secret Manager, and HashiCorp Vault.
 - [tests/](tests/)
   Integration-style worker tests against PostgreSQL plus config/crypto tests.
 
 ## Environment Configuration
 
-The worker config reader expects these environment variables:
+The worker reads `compliance.worker.yml` plus runtime secrets. The YAML is the legal contract; env vars and secret files provide credentials only.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `DPDP_MASTER_KEY` | 32-byte KEK in hex or base64 | Required |
-| `DPDP_HMAC_KEY` | 32-byte HMAC key in hex or base64 | Falls back to `DPDP_MASTER_KEY` |
-| `DPDP_APP_SCHEMA` | Client application schema | `mock_app` |
-| `DPDP_ENGINE_SCHEMA` | Worker schema | `dpdp_engine` |
-| `DPDP_RETENTION_YEARS` | Retention period for vaulted PII | `5` |
-| `DPDP_NOTICE_WINDOW_HOURS` | Time before shredding when notice is allowed | `48` |
-| `DPDP_GRAPH_MAX_DEPTH` | Maximum FK recursion depth before fail-closed | `32` |
-| `DPDP_OUTBOX_BATCH_SIZE` | Outbox batch size per poll | `10` |
-| `DPDP_OUTBOX_LEASE_SECONDS` | How long a claimed outbox batch stays leased | `60` |
-| `DPDP_OUTBOX_MAX_ATTEMPTS` | Max delivery retries before dead-letter | `10` |
-| `DPDP_OUTBOX_BASE_BACKOFF_MS` | Base exponential backoff in milliseconds | `1000` |
-| `DPDP_NOTIFICATION_LEASE_SECONDS` | Lease duration for pre-erasure notices | `120` |
+| `DATABASE_URL` | Primary client PostgreSQL DSN | `postgres://postgres:postgres@localhost:5432/postgres` |
+| `API_BASE_URL` | Base URL for worker task acknowledgements | `http://localhost:3000/api/v1/worker/tasks` |
+| `API_SYNC_URL` | Worker sync endpoint | `http://localhost:3000/api/v1/worker/sync` |
+| `API_OUTBOX_URL` | Worker outbox ingestion endpoint | `http://localhost:3000/api/v1/worker/outbox` |
+| `API_CLIENT_ID` | Worker client id/name registered in the Control Plane | `worker-1` |
+| `API_WORKER_TOKEN` / `_FILE` | Worker bearer token | `worker-secret` fallback for local only |
+| `API_REQUEST_SIGNING_SECRET` / `_FILE` | Optional worker request-signing secret | _unset_ |
+| `MAILER_WEBHOOK_URL` | Required mailer transport webhook | Required for production boot |
+| `MAILER_TIMEOUT_MS` | Mailer webhook timeout | `10000` |
+| `METRICS_PORT` | Worker health/metrics port | `9464` |
+| `DPDP_MASTER_KEY` / `_FILE` | 32-byte KEK when YAML uses env/file key source | Required unless remote KMS source is configured |
+| `DPDP_HMAC_KEY` / `_FILE` | 32-byte HMAC key when YAML uses env/file key source | Falls back to KEK only for local/dev source modes |
 
 Supported secret formats:
 
@@ -91,6 +104,17 @@ Supported secret formats:
 - prefixed hex: `hex:4242...`
 - raw base64
 - prefixed base64: `base64:...`
+
+YAML-required legal fields include:
+
+- `legal_attestation.dpo_identifier`
+- `legal_attestation.configuration_version`
+- `legal_attestation.legal_review_date`
+- `legal_attestation.acknowledgment`
+- `compliance_policy.retention_rules[].legal_citation`
+- `graph.root_pii_columns`
+- `satellite_targets`
+- `integrity.expected_schema_hash`
 
 ## Local Verification
 
@@ -121,17 +145,22 @@ Override it with `TEST_DATABASE_URL` if needed.
 - AES key length validation and tamper detection.
 - Config parsing and malformed-secret rejection.
 - Deep recursive graph traversal, cycle handling, and fail-closed depth limits.
+- FK cascade/set-null guardrail failures.
 - Vault decryptability, rollback behavior, hard-delete fast path, and idempotent replay.
 - Notice due-window enforcement, lease cleanup after mail failure, and duplicate-send protection.
 - Shred timing/notice fail-safes and post-shred destroyed sentinel verification.
 - Outbox retry scheduling, dead-lettering, expired lease recovery, and concurrent batch claiming.
+- S3 SigV4 signing, S3 blob legal hold/version purge logic, and HMACed blob receipts.
+- Worker retry behavior for Control Plane task acknowledgements.
 
 ## Operational Notes
 
 - This worker keeps **raw PII local**. Only metadata leaves through the outbox.
 - After shredding, the local vault row keeps non-PII audit metadata but replaces ciphertext with a destroyed sentinel.
 - The worker intentionally fails closed when FK traversal hits its recursion limit or configuration is invalid.
-- The default `sendToAPI` helper is deterministic and test-friendly; production code should inject `createFetchDispatcher(...)` or another transport.
+- Production boot requires a real mailer webhook transport; the worker no longer silently uses a mock mailer.
+- The worker uses bounded 5-second short-polling against the Control Plane rather than true held long-polling.
+- Live execution reads from the primary transaction for TOCTOU safety. Replica routing is used only where it does not weaken consistency, such as dry-run/shadow reads.
 
 ## Further Documentation
 

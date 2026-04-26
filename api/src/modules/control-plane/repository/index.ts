@@ -27,6 +27,7 @@ import {
   createJobAndQueueTask,
   getJobById,
   getJobByIdempotencyKey,
+  listErasureJobs,
   transitionJobFromOutbox,
 } from "./jobs";
 import {
@@ -53,6 +54,7 @@ import type {
   InsertCertificateInput,
   InsertWorkerConfigHeartbeatInput,
   InsertUsageEventInput,
+  ListErasureJobsInput,
   RepositoryContext,
   RotateClientKeyInput,
   TaskQueueRow,
@@ -231,6 +233,16 @@ export class ControlPlaneRepository {
    */
   async getJobByIdempotencyKey(idempotencyKey: string): Promise<ErasureJobRow | null> {
     return getJobByIdempotencyKey(this.context, idempotencyKey);
+  }
+
+  /**
+   * Lists erasure lifecycle aggregates for operator dashboards.
+   *
+   * @param input - Pagination and optional status filter.
+   * @returns Matching jobs newest first.
+   */
+  async listErasureJobs(input: ListErasureJobsInput): Promise<ErasureJobRow[]> {
+    return listErasureJobs(this.context, input);
   }
 
   /**

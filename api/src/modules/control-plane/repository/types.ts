@@ -255,6 +255,15 @@ export interface InsertUsageEventInput {
 }
 
 /**
+ * Operator filters for listing erasure lifecycle aggregates.
+ */
+export interface ListErasureJobsInput {
+  status?: ErasureRequestStatus;
+  limit: number;
+  offset: number;
+}
+
+/**
  * Input required to transition a job from an accepted worker outbox event.
  */
 export interface TransitionJobFromOutboxInput {

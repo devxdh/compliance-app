@@ -17,4 +17,5 @@ Each file is intentionally focused on one concern so the diagrams stay readable:
   Task leasing, retry, dead-letter, outbox delivery, and replay-safe recovery.
 
 All diagrams describe the system as it exists in this repository today.
-They do not assume a first-party UI, mTLS, or an external KMS service because those are not implemented in the current codebase.
+They include the first-party Next.js operator dashboard, server-side BFF boundary, native KMS adapters, and metadata-only Control Plane.
+They do not assume a fully managed cloud deployment, paid billing provider, SSO/SCIM, or true long-polling because those are not implemented in the current codebase.

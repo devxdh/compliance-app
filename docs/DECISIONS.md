@@ -14,7 +14,7 @@
 
 ### 4. S3 Object Lifecycle: Versioned Hard Purge
 **Decision:** Explicitly enumerate and delete all S3 object versions and delete markers during shredding.
-**Rationale:** Standard S3 deletes only hide data. For DPDP/GDPR compliance, "Permanent Erasure" requires purging the object's entire version history.
+**Rationale:** Standard S3 deletes only hide data. For DPDP/PMLA-grade erasure evidence, "Permanent Erasure" requires purging the object's entire version history when retention expires.
 
 ### 5. Legal Object Lock: WORM Protection
 **Decision:** Apply S3 Object Lock (Legal Hold) during the vaulting phase.
@@ -31,3 +31,19 @@
 ### 8. Concurrency & Integrity: REPEATABLE READ + Snapshot Locking
 **Decision:** Execute a `SELECT FOR UPDATE` on the root entity *before* graph traversal.
 **Rationale:** Eliminates TOCTOU (Time-of-Check to Time-of-Use) anomalies. Guarantees that the discovered dependency graph is consistent and immutable during the vaulting transaction.
+
+### 9. Calendar Ownership: Lazy Executioner Model
+**Decision:** The Control Plane owns all cooldown, notice, and shred scheduling. The Worker remains stateless and only executes tasks it leases.
+**Rationale:** If a worker restarts or is offline, no legal timer is lost. Durable state lives in `erasure_jobs` and `task_queue`, not in sidecar memory.
+
+### 10. Polling Transport: Bounded Short-Polling
+**Decision:** Use a 5-second egress-only short-poll loop for `/api/v1/worker/sync`.
+**Rationale:** This is simpler to deploy inside client VPCs than true long-polling with Postgres `LISTEN/NOTIFY` or a broker. The task lease and idempotency model are transport-agnostic, so long-polling can be added later without changing legal state transitions.
+
+### 11. Web Dashboard: Server-Side BFF
+**Decision:** The Next.js dashboard is a BFF. It calls admin endpoints only from server components, route handlers, and server actions.
+**Rationale:** The browser must never receive `ADMIN_API_TOKEN` or worker credentials. Missing server config must produce an explicit configuration-required UI, not fake dashboard data.
+
+### 12. ORM Avoidance
+**Decision:** Do not add Prisma, TypeORM, or Sequelize to any package.
+**Rationale:** The product depends on exact SQL semantics: `FOR UPDATE SKIP LOCKED`, `REPEATABLE READ`, Postgres time math, dynamic identifier escaping, recursive CTEs, and WORM chain-head reads. `postgres.js` keeps those semantics explicit and auditable.
